@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-from app.database import get_connection
+from app.db_provider import convert_placeholders, get_runtime_connection, rows_to_dicts
 from app.docx_utils import (
     add_compact_paragraph,
     add_warning,
@@ -32,9 +32,9 @@ def get_students_for_group(group_name: str, course_code: str, staff_number: str 
     if staff_number:
         lecturer_filter = "AND l.staff_number = ?"
         params.append(staff_number)
-    with get_connection() as conn:
+    with get_runtime_connection() as conn:
         rows = conn.execute(
-            f"""
+            convert_placeholders(f"""
             SELECT s.student_number, s.surname, s.initials, s.full_name
             FROM group_enrolments ge
             JOIN students s ON s.id = ge.student_id
@@ -47,10 +47,10 @@ def get_students_for_group(group_name: str, course_code: str, staff_number: str 
               AND c.course_code = ?
               {lecturer_filter}
             ORDER BY s.surname, s.initials, s.student_number
-            """,
+            """),
             tuple(params),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return rows_to_dicts(rows)
 
 
 def _student_rows(students: list[dict], session_count: int) -> list[list[str]]:

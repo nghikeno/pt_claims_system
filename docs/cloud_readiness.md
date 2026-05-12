@@ -195,4 +195,13 @@ Phase 14.4 improves the production runtime path after real PostgreSQL and object
 - Register ZIP downloads remain visible in the document-generation workflow.
 - Download buttons and signed-link buttons use readable high-contrast styling.
 - Local testing against remote Neon PostgreSQL can still feel slower than a deployed app because each query crosses the internet. The app reduces repeated dashboard count queries with short-lived, scoped Streamlit caching, but production performance still depends on hosting the app and database in nearby regions where possible.
-- Secrets remain hidden from UI, logs, and readiness output.
+
+## Phase 14.5.3 deployed runtime follow-up
+
+Remaining deployed runtime paths were reviewed for SQLite fallbacks. View as lecturer and Course and Group Entry use the provider-aware database path so PostgreSQL deployments do not read empty local SQLite data by mistake.
+
+Generated document output metadata persists in the Streamlit session after download-triggered reruns. In object-storage mode the app stores object keys, not secrets, and can regenerate short-lived signed download links.
+
+Streamlit Cloud platform controls are outside app code. The app RBAC controls only in-app pages and data access. Verify the lecturer experience from an incognito/private browser or a non-owner viewer account, and manage platform permissions through Streamlit Cloud sharing and workspace settings.
+
+Secrets remain hidden from UI, logs, and readiness output.

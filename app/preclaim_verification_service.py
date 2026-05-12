@@ -9,8 +9,9 @@ import pandas as pd
 
 from app.academic_calendar_service import NUST_2026_REFERENCE_ITEMS, fetch_calendar_exclusions_for_period
 from app.claim_period_service import resolve_claim_period
-from app.config import EXPORTS_DIR
-from app.database import get_connection, init_db
+from app.config import EXPORTS_DIR, database_provider
+from app.database import init_db
+from app.db_provider import convert_placeholders, get_runtime_connection, row_to_dict, rows_to_dicts
 from app.session_generator import generate_monthly_sessions
 from app.validators import detect_clashes, parse_date
 
@@ -37,25 +38,27 @@ def _month_overlaps(start_date: str, end_date: str, year: int, month: int) -> tu
 
 
 def _fetch_lecturer(staff_number: str) -> dict[str, Any] | None:
-    init_db()
-    with get_connection() as conn:
+    if database_provider() == "sqlite":
+        init_db()
+    with get_runtime_connection() as conn:
         row = conn.execute(
-            """
+            convert_placeholders("""
             SELECT id, staff_number, title, full_name, campus, tariff_per_hour,
                    contract_start_date, contract_end_date, active
             FROM lecturers
             WHERE staff_number = ?
-            """,
+            """),
             (str(staff_number),),
         ).fetchone()
-    return dict(row) if row else None
+    return row_to_dict(row)
 
 
 def _fetch_active_groups(staff_number: str) -> pd.DataFrame:
-    init_db()
-    with get_connection() as conn:
+    if database_provider() == "sqlite":
+        init_db()
+    with get_runtime_connection() as conn:
         rows = conn.execute(
-            """
+            convert_placeholders("""
             SELECT g.id AS group_id, g.group_name, c.course_code, c.course_name,
                    g.campus, g.study_mode, g.active,
                    COALESCE(SUM(CASE WHEN ge.active = 1 THEN 1 ELSE 0 END), 0) AS active_enrolments
@@ -66,17 +69,18 @@ def _fetch_active_groups(staff_number: str) -> pd.DataFrame:
             WHERE l.staff_number = ? AND g.lecturer_id IS NOT NULL AND g.active = 1
             GROUP BY g.id, g.group_name, c.course_code, c.course_name, g.campus, g.study_mode, g.active
             ORDER BY c.course_code, g.group_name
-            """,
+            """),
             (str(staff_number),),
         ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
+    return pd.DataFrame(rows_to_dicts(rows))
 
 
 def _fetch_active_timetable(staff_number: str) -> pd.DataFrame:
-    init_db()
-    with get_connection() as conn:
+    if database_provider() == "sqlite":
+        init_db()
+    with get_runtime_connection() as conn:
         rows = conn.execute(
-            """
+            convert_placeholders("""
             SELECT t.id AS timetable_id, g.id AS group_id, g.group_name,
                    c.course_code, c.course_name, t.day_of_week, t.start_time, t.end_time,
                    t.effective_start_date, t.effective_end_date, t.active
@@ -86,10 +90,10 @@ def _fetch_active_timetable(staff_number: str) -> pd.DataFrame:
             JOIN courses AS c ON c.id = g.course_id
             WHERE l.staff_number = ? AND t.active = 1 AND g.active = 1
             ORDER BY c.course_code, g.group_name, t.day_of_week, t.start_time
-            """,
+            """),
             (str(staff_number),),
         ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
+    return pd.DataFrame(rows_to_dicts(rows))
 
 
 def _expected_calendar_items(year: int, month: int) -> list[dict[str, str]]:

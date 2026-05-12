@@ -5,7 +5,9 @@ from typing import Any
 import pandas as pd
 
 from app.data_validation import parse_bool
-from app.database import get_connection, init_db
+from app.config import database_provider
+from app.database import init_db
+from app.db_provider import convert_placeholders, get_runtime_connection, row_to_dict, rows_to_dicts
 from app.lecturer_service import lecturer_exists, reject_bank_detail_text
 
 
@@ -45,9 +47,18 @@ def _normalise_group_data(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _ensure_local_schema() -> None:
+    if database_provider() == "sqlite":
+        init_db()
+
+
+def _df_from_rows(rows: list[Any]) -> pd.DataFrame:
+    return pd.DataFrame(rows_to_dicts(rows))
+
+
 def list_courses() -> pd.DataFrame:
-    init_db()
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         rows = conn.execute(
             """
             SELECT id, course_code, course_name, faculty, department, budget_allocation, active
@@ -55,17 +66,17 @@ def list_courses() -> pd.DataFrame:
             ORDER BY course_code
             """
         ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
+    return _df_from_rows(rows)
 
 
 def get_course_by_code(course_code: str) -> dict | None:
-    init_db()
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         row = conn.execute(
-            "SELECT * FROM courses WHERE course_code = ?",
+            convert_placeholders("SELECT * FROM courses WHERE course_code = ?"),
             (_clean_course_code(course_code),),
         ).fetchone()
-    return dict(row) if row else None
+    return row_to_dict(row)
 
 
 def course_exists(course_code: str) -> bool:
@@ -97,13 +108,13 @@ def create_course(data: dict[str, Any]) -> dict:
     cleaned = _normalise_course_data(data)
     if course_exists(cleaned["course_code"]):
         raise ValueError("Course with this course code already exists. Use Update Course.")
-    init_db()
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         conn.execute(
-            """
+            convert_placeholders("""
             INSERT INTO courses (course_code, course_name, faculty, department, budget_allocation, active)
             VALUES (?, ?, ?, ?, ?, ?)
-            """,
+            """),
             tuple(cleaned[column] for column in COURSE_COLUMNS),
         )
     return get_course_by_code(cleaned["course_code"])
@@ -118,13 +129,14 @@ def update_course(course_code: str, data: dict[str, Any]) -> dict:
     if not is_valid:
         raise ValueError("; ".join(errors))
     cleaned = _normalise_course_data(data_for_validation)
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         conn.execute(
-            """
+            convert_placeholders("""
             UPDATE courses
             SET course_name = ?, faculty = ?, department = ?, budget_allocation = ?, active = ?
             WHERE course_code = ?
-            """,
+            """),
             (
                 cleaned["course_name"],
                 cleaned["faculty"],
@@ -138,8 +150,8 @@ def update_course(course_code: str, data: dict[str, Any]) -> dict:
 
 
 def list_groups() -> pd.DataFrame:
-    init_db()
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         rows = conn.execute(
             """
             SELECT g.group_name, c.course_code, c.course_name, g.campus, g.study_mode, g.active
@@ -149,22 +161,22 @@ def list_groups() -> pd.DataFrame:
             ORDER BY c.course_code, g.group_name
             """
         ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
+    return _df_from_rows(rows)
 
 
 def get_group(group_name: str, course_code: str) -> dict | None:
-    init_db()
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         row = conn.execute(
-            """
+            convert_placeholders("""
             SELECT g.*, c.course_code, c.course_name
             FROM student_groups AS g
             JOIN courses AS c ON c.id = g.course_id
             WHERE g.group_name = ? AND c.course_code = ? AND g.lecturer_id IS NULL
-            """,
+            """),
             (_clean(group_name), _clean_course_code(course_code)),
         ).fetchone()
-    return dict(row) if row else None
+    return row_to_dict(row)
 
 
 def group_exists(group_name: str, course_code: str) -> bool:
@@ -190,15 +202,15 @@ def validate_group_data(data: dict[str, Any]) -> tuple[bool, list[str]]:
 
 
 def _course_id_for_code(course_code: str) -> int:
-    init_db()
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         row = conn.execute(
-            "SELECT id FROM courses WHERE course_code = ?",
+            convert_placeholders("SELECT id FROM courses WHERE course_code = ?"),
             (_clean_course_code(course_code),),
         ).fetchone()
     if row is None:
         raise ValueError("Course code must reference an existing course.")
-    return int(row["id"])
+    return int((row_to_dict(row) or {})["id"])
 
 
 def create_group(data: dict[str, Any]) -> dict:
@@ -209,12 +221,13 @@ def create_group(data: dict[str, Any]) -> dict:
     if group_exists(cleaned["group_name"], cleaned["course_code"]):
         raise ValueError("Group with this name already exists for the selected course. Use Update Group.")
     course_id = _course_id_for_code(cleaned["course_code"])
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         conn.execute(
-            """
+            convert_placeholders("""
             INSERT INTO student_groups (group_name, course_id, campus, study_mode, active)
             VALUES (?, ?, ?, ?, ?)
-            """,
+            """),
             (cleaned["group_name"], course_id, cleaned["campus"], cleaned["study_mode"], cleaned["active"]),
         )
     return get_group(cleaned["group_name"], cleaned["course_code"])
@@ -231,13 +244,14 @@ def update_group(group_name: str, course_code: str, data: dict[str, Any]) -> dic
         raise ValueError("; ".join(errors))
     cleaned = _normalise_group_data(data_for_validation)
     course_id = _course_id_for_code(target_course_code)
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         conn.execute(
-            """
+            convert_placeholders("""
             UPDATE student_groups
             SET campus = ?, study_mode = ?, active = ?
             WHERE group_name = ? AND course_id = ?
-            """,
+            """),
             (
                 cleaned["campus"],
                 cleaned["study_mode"],
@@ -250,8 +264,8 @@ def update_group(group_name: str, course_code: str, data: dict[str, Any]) -> dic
 
 
 def find_duplicate_groups() -> pd.DataFrame:
-    init_db()
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         rows = conn.execute(
             """
             SELECT c.course_code, g.group_name, COUNT(*) AS count
@@ -263,19 +277,19 @@ def find_duplicate_groups() -> pd.DataFrame:
             ORDER BY c.course_code, g.group_name
             """
         ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
+    return _df_from_rows(rows)
 
 
 def _lecturer_id_for_staff_number(staff_number: str) -> int:
-    init_db()
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         row = conn.execute(
-            "SELECT id FROM lecturers WHERE staff_number = ?",
+            convert_placeholders("SELECT id FROM lecturers WHERE staff_number = ?"),
             (_clean(staff_number).replace(" ", ""),),
         ).fetchone()
     if row is None:
         raise ValueError("Staff number must reference an existing lecturer.")
-    return int(row["id"])
+    return int((row_to_dict(row) or {})["id"])
 
 
 def _normalise_lecturer_group_data(data: dict[str, Any]) -> dict[str, Any]:
@@ -319,7 +333,7 @@ def validate_lecturer_group_data(data: dict[str, Any]) -> tuple[bool, list[str]]
 
 
 def list_lecturer_groups(staff_number: str | None = None, course_code: str | None = None) -> pd.DataFrame:
-    init_db()
+    _ensure_local_schema()
     params: list[str] = []
     where = ["g.lecturer_id IS NOT NULL"]
     if staff_number:
@@ -328,9 +342,9 @@ def list_lecturer_groups(staff_number: str | None = None, course_code: str | Non
     if course_code:
         where.append("c.course_code = ?")
         params.append(_clean_course_code(course_code))
-    with get_connection() as conn:
+    with get_runtime_connection() as conn:
         rows = conn.execute(
-            f"""
+            convert_placeholders(f"""
             SELECT g.id AS group_id, l.staff_number, l.full_name AS lecturer_name, c.course_code, c.course_name,
                    g.group_name, g.campus, g.study_mode, g.active
             FROM student_groups AS g
@@ -338,10 +352,10 @@ def list_lecturer_groups(staff_number: str | None = None, course_code: str | Non
             JOIN courses AS c ON c.id = g.course_id
             WHERE {" AND ".join(where)}
             ORDER BY l.staff_number, c.course_code, g.group_name
-            """,
+            """),
             tuple(params),
         ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
+    return _df_from_rows(rows)
 
 
 def list_groups_for_lecturer(staff_number: str) -> pd.DataFrame:
@@ -353,19 +367,19 @@ def list_groups_for_lecturer(staff_number: str) -> pd.DataFrame:
 
 
 def get_lecturer_group(staff_number: str, course_code: str, group_name: str) -> dict | None:
-    init_db()
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         row = conn.execute(
-            """
+            convert_placeholders("""
             SELECT g.*, l.staff_number, l.full_name AS lecturer_name, c.course_code, c.course_name
             FROM student_groups AS g
             JOIN lecturers AS l ON l.id = g.lecturer_id
             JOIN courses AS c ON c.id = g.course_id
             WHERE l.staff_number = ? AND c.course_code = ? AND g.group_name = ?
-            """,
+            """),
             (_clean(staff_number).replace(" ", ""), _clean_course_code(course_code), _clean(group_name)),
         ).fetchone()
-    return dict(row) if row else None
+    return row_to_dict(row)
 
 
 def lecturer_group_exists(staff_number: str, course_code: str, group_name: str) -> bool:
@@ -381,12 +395,13 @@ def create_lecturer_group(data: dict[str, Any]) -> dict:
         raise ValueError("Group with this name already exists for the selected lecturer and course.")
     lecturer_id = _lecturer_id_for_staff_number(cleaned["staff_number"])
     course_id = _course_id_for_code(cleaned["course_code"])
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         conn.execute(
-            """
+            convert_placeholders("""
             INSERT INTO student_groups (group_name, course_id, lecturer_id, campus, study_mode, active)
             VALUES (?, ?, ?, ?, ?, ?)
-            """,
+            """),
             (
                 cleaned["group_name"],
                 course_id,
@@ -423,13 +438,14 @@ def update_lecturer_group(staff_number: str, course_code: str, group_name: str, 
         cleaned["group_name"],
     ):
         raise ValueError("Group with this name already exists for the selected lecturer and course.")
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         conn.execute(
-            """
+            convert_placeholders("""
             UPDATE student_groups
             SET group_name = ?, campus = ?, study_mode = ?, active = ?
             WHERE lecturer_id = ? AND course_id = ? AND group_name = ?
-            """,
+            """),
             (
                 cleaned["group_name"],
                 cleaned["campus"],
@@ -444,8 +460,8 @@ def update_lecturer_group(staff_number: str, course_code: str, group_name: str, 
 
 
 def find_duplicate_lecturer_groups() -> pd.DataFrame:
-    init_db()
-    with get_connection() as conn:
+    _ensure_local_schema()
+    with get_runtime_connection() as conn:
         rows = conn.execute(
             """
             SELECT l.staff_number, c.course_code, g.group_name, COUNT(*) AS count
@@ -457,4 +473,4 @@ def find_duplicate_lecturer_groups() -> pd.DataFrame:
             ORDER BY l.staff_number, c.course_code, g.group_name
             """
         ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
+    return _df_from_rows(rows)

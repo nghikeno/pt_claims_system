@@ -124,4 +124,14 @@ The command preserves IDs, inserts parent tables before child tables, resets Pos
 
 In `DOCUMENT_STORAGE_MODE=object_storage`, generated documents are stored durably through the configured S3-compatible provider. The UI shows object keys and uses short-lived signed download links where supported. Do not expose local server paths as production download references.
 
+## Streamlit Cloud Platform Controls
+
+Streamlit Cloud controls such as Manage app, Logs, Reboot app, Delete app, and Settings are platform UI controlled by Streamlit workspace, GitHub, and sharing permissions. The PT Claims app RBAC controls only in-app navigation, data access, lecturer scoping, account management, document generation, and administrative pages.
+
+To verify lecturer access, test from an incognito/private browser or an account that is not an owner/developer of the Streamlit workspace. Configure Streamlit Cloud sharing/privacy settings so lecturers have viewer access only and cannot manage the deployed app.
+
+## Phase 14.5.3 Runtime Review
+
+Phase 14.5.3 keeps app-internal admin controls role-gated, keeps the lecturer document engine hidden, and adds a claim completeness check based on distinct `course_code` plus `group_name` pairs. This helps verify lecturers with more than one course, including cases where the same group name exists under multiple courses.
+
 Local testing against remote Neon PostgreSQL can be slower than the deployed app because every query crosses the internet. Keep the Streamlit app and PostgreSQL database in nearby regions where possible, and review provider plan settings if always-on performance is required.

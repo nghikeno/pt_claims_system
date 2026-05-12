@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 
+import pandas as pd
+
 from app.create_maria_pilot_workbook import create_maria_pilot_workbook
 from app.dev_reset import dev_reset
 from app.import_master_data import import_master_data
 from app.session_generator import generate_monthly_sessions
+from app.claim_completeness_service import audit_claim_completeness_from_data
 from app_docxtpl.context_builders import build_claim_context, build_register_page_contexts
 
 
@@ -62,8 +65,83 @@ def test_maria_claim_context_numbering_restarts_per_group():
     rows = build_claim_context(sessions_df, 2026, 4)["claim_rows"]
     first_rows = [row for row in rows if row["group_display"]]
 
-    assert len(first_rows) == sessions_df["group_name"].nunique()
+    assert len(first_rows) == sessions_df[["course_code", "group_name"]].drop_duplicates().shape[0]
     assert all(row["no"] == "1" for row in first_rows)
+
+
+def test_claim_context_keeps_same_group_name_distinct_across_courses():
+    sessions_df = pd.DataFrame(
+        [
+            {
+                "course_code": "CUS411S",
+                "course_name": "Course A",
+                "department": "Informatics",
+                "faculty": "Computing",
+                "budget_allocation": "B1",
+                "group_name": "SHARED_GROUP",
+                "session_date": "2026-05-05",
+                "start_time": "08:00",
+                "end_time": "09:00",
+                "hours": 1.0,
+                "amount": 440.0,
+                "tariff_per_hour": 440.0,
+                "title": "Ms",
+                "lecturer_name": "Demo Lecturer",
+                "highest_qualification": "MSc",
+                "staff_number": "900001",
+                "id_or_passport_number": "DUMMY",
+                "paye_number": "DUMMY",
+                "physical_address": "DUMMY",
+                "contact_number": "DUMMY",
+            },
+            {
+                "course_code": "ICT521S",
+                "course_name": "Course B",
+                "department": "Informatics",
+                "faculty": "Computing",
+                "budget_allocation": "B2",
+                "group_name": "SHARED_GROUP",
+                "session_date": "2026-05-06",
+                "start_time": "08:00",
+                "end_time": "09:00",
+                "hours": 1.0,
+                "amount": 440.0,
+                "tariff_per_hour": 440.0,
+                "title": "Ms",
+                "lecturer_name": "Demo Lecturer",
+                "highest_qualification": "MSc",
+                "staff_number": "900001",
+                "id_or_passport_number": "DUMMY",
+                "paye_number": "DUMMY",
+                "physical_address": "DUMMY",
+                "contact_number": "DUMMY",
+            },
+        ]
+    )
+
+    context = build_claim_context(sessions_df, 2026, 5)
+    first_rows = [row for row in context["claim_rows"] if row["group_display"]]
+    audit = audit_claim_completeness_from_data(sessions_df, context)
+
+    assert len(first_rows) == 2
+    assert {row["course_code"] for row in first_rows} == {"CUS411S", "ICT521S"}
+    assert audit["status"] == "PASS"
+    assert audit["missing_pairs"] == []
+
+
+def test_claim_completeness_detects_missing_course_group_pair():
+    sessions_df = pd.DataFrame(
+        [
+            {"course_code": "CUS411S", "group_name": "GROUP_A", "session_date": "2026-05-05", "hours": 1.0, "amount": 440.0},
+            {"course_code": "ICT521S", "group_name": "GROUP_A", "session_date": "2026-05-06", "hours": 1.0, "amount": 440.0},
+        ]
+    )
+    claim_context = {"claim_rows": [{"course_code": "CUS411S", "group_name": "GROUP_A"}]}
+
+    audit = audit_claim_completeness_from_data(sessions_df, claim_context)
+
+    assert audit["status"] == "WARN"
+    assert audit["missing_pairs"] == [{"course_code": "ICT521S", "group_name": "GROUP_A"}]
 
 
 def test_maria_register_contexts_split_groups_and_include_dummy_students():

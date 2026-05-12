@@ -301,7 +301,7 @@ def test_find_duplicate_groups_detects_manually_existing_duplicates(monkeypatch,
         return conn
 
     monkeypatch.setattr("app.course_group_service.init_db", lambda: None)
-    monkeypatch.setattr("app.course_group_service.get_connection", temp_connection)
+    monkeypatch.setattr("app.course_group_service.get_runtime_connection", temp_connection)
 
     duplicates = find_duplicate_groups()
 
@@ -556,7 +556,7 @@ def test_find_duplicate_lecturer_groups_detects_manually_existing_duplicates(mon
         return conn
 
     monkeypatch.setattr("app.course_group_service.init_db", lambda: None)
-    monkeypatch.setattr("app.course_group_service.get_connection", temp_connection)
+    monkeypatch.setattr("app.course_group_service.get_runtime_connection", temp_connection)
 
     duplicates = find_duplicate_lecturer_groups()
 

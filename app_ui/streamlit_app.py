@@ -42,6 +42,7 @@ from app.config import (
     session_timeout_minutes,
 )
 from app.claim_period_service import resolve_claim_period
+from app.claim_completeness_service import audit_claim_completeness_from_data, build_claim_completeness_audit
 from app.course_group_service import (
     course_exists,
     create_course,
@@ -70,7 +71,7 @@ from app.create_maria_pilot_workbook import (
     EXPECTED_SESSIONS,
     create_maria_pilot_workbook,
 )
-from app.database import get_connection, init_db
+from app.db_provider import convert_placeholders, get_runtime_connection, init_runtime_db, row_to_dict
 from app.dev_reset import dev_reset
 from app.document_generator import generate_monthly_documents
 from app.document_storage import document_storage_status, generate_download_url, save_generated_file, storage_key_for_generated_file
@@ -118,6 +119,7 @@ from app.timetable_service import (
 )
 from app.validators import detect_clashes
 from app.verification_report import generate_verification_checklist, get_excluded_date_details
+from app_docxtpl.context_builders import build_claim_context
 from app_docxtpl.render_documents_v2 import render_documents_v2
 from app_ui.ui_helpers import (
     can_import_workbook,
@@ -233,6 +235,120 @@ def render_document_storage_summary(storage_rows: list[dict] | None) -> None:
                     st.link_button(f"Download {name}", url, width="stretch")
 
 
+def document_output_state_key(page_name: str, staff_number: str, year: int, month: int) -> str:
+    user = current_user() or {}
+    actual = actual_user() or {}
+    view_state = "view-as" if is_viewing_as_lecturer() else "normal"
+    username = str(actual.get("username") or user.get("username") or "anonymous")
+    return f"document_output::{page_name}::{username}::{view_state}::{staff_number}::{int(year)}::{int(month):02d}"
+
+
+def build_document_output_state(
+    result: dict,
+    staff_number: str,
+    year: int,
+    month: int,
+    storage_rows: list[dict] | None = None,
+    zip_path: str | Path | None = None,
+    verification_path: str | Path | None = None,
+    claim_audit: dict | None = None,
+) -> dict:
+    return {
+        "staff_number": str(staff_number),
+        "year": int(year),
+        "month": int(month),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "output_dir": str(result.get("output_dir") or ""),
+        "claim_path": str(result.get("claim_path") or ""),
+        "register_paths": [str(path) for path in result.get("register_paths", [])],
+        "zip_path": str(zip_path or ""),
+        "verification_path": str(verification_path or ""),
+        "storage": list(storage_rows or result.get("storage", [])),
+        "claim_audit": claim_audit or {},
+    }
+
+
+def render_claim_completeness_audit(audit: dict | None) -> None:
+    if not audit:
+        return
+    st.subheader("Claim completeness")
+    status = audit.get("status", "PASS")
+    if status == "PASS":
+        st.success("All generated-session course/group pairs are represented in the claim context.")
+    else:
+        st.warning("Review claim completeness before submission.")
+    missing = audit.get("missing_pairs") or []
+    extra = audit.get("extra_pairs") or []
+    if missing:
+        st.error("Missing course/group pairs in claim context.")
+        st.dataframe(pd.DataFrame(missing), width="stretch")
+    if extra:
+        st.warning("Extra course/group pairs found in claim context.")
+        st.dataframe(pd.DataFrame(extra), width="stretch")
+    with st.expander("Claim completeness details"):
+        st.write("Expected course/group pairs")
+        st.dataframe(pd.DataFrame(audit.get("expected_pairs") or []), width="stretch")
+        st.write("Totals by course")
+        st.dataframe(pd.DataFrame(audit.get("totals_by_course") or []), width="stretch")
+        st.write("Totals by course and group")
+        st.dataframe(pd.DataFrame(audit.get("totals_by_group") or []), width="stretch")
+
+
+def render_document_output_state(state: dict, owner_label: str = "") -> None:
+    storage_status = document_storage_status()
+    if owner_label:
+        st.caption(owner_label)
+    created_at = state.get("created_at")
+    if created_at:
+        st.caption(f"Generated at: {created_at}")
+    if storage_status.mode == "local":
+        render_path_block("Output folder", state.get("output_dir", ""))
+    else:
+        st.caption("Generated files are stored through the configured document-storage mode; local server paths are not the durable reference.")
+
+    claim_value = str(state.get("claim_path") or "")
+    claim_path = Path(claim_value)
+    st.subheader("Claim DOCX")
+    if storage_status.mode == "local":
+        render_file_metadata(claim_path)
+        render_download_button("Download claim DOCX", claim_path, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    else:
+        st.write(Path(str(state.get("claim_path") or "claim.docx")).name)
+
+    register_paths = [Path(str(path)) for path in state.get("register_paths", [])]
+    st.subheader("Attendance registers")
+    st.write(f"Number of register files: {len(register_paths)}")
+    if register_paths:
+        st.dataframe(pd.DataFrame([{"register_file": path.name} for path in register_paths]), width="stretch")
+
+    zip_value = str(state.get("zip_path") or "")
+    zip_path = Path(zip_value)
+    if zip_value:
+        st.subheader("Registers ZIP")
+        if storage_status.mode == "local":
+            render_file_metadata(zip_path)
+            render_download_button("Download all registers ZIP", zip_path, "application/zip")
+        else:
+            st.write(zip_path.name)
+
+    verification_value = str(state.get("verification_path") or "")
+    verification_path = Path(verification_value)
+    if verification_value:
+        st.subheader("Verification checklist")
+        if storage_status.mode == "local":
+            render_file_metadata(verification_path)
+            render_download_button(
+                "Download verification checklist Excel",
+                verification_path,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        else:
+            st.write(verification_path.name)
+
+    render_document_storage_summary(state.get("storage") or [])
+    render_claim_completeness_audit(state.get("claim_audit"))
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def cached_admin_dashboard_counts() -> dict[str, int]:
     return dashboard_counts()
@@ -255,16 +371,18 @@ def is_viewing_as_lecturer() -> bool:
     return "view_as_lecturer_user" in st.session_state
 
 
-def _lecturer_view_user_from_staff_number(staff_number: str) -> dict | None:
-    with get_connection() as conn:
+def _lecturer_view_user_from_identifier(identifier: str | int) -> dict | None:
+    cleaned_identifier = str(identifier).strip()
+    with get_runtime_connection() as conn:
         row = conn.execute(
-            """
+            convert_placeholders("""
             SELECT l.id AS lecturer_id, l.staff_number, l.full_name
             FROM lecturers AS l
-            WHERE l.staff_number = ? AND l.active = 1
-            """,
-            (str(staff_number),),
+            WHERE (l.staff_number = ? OR CAST(l.id AS TEXT) = ?) AND l.active = 1
+            """),
+            (cleaned_identifier, cleaned_identifier),
         ).fetchone()
+    row = row_to_dict(row)
     if row is None:
         return None
     return {
@@ -278,6 +396,20 @@ def _lecturer_view_user_from_staff_number(staff_number: str) -> dict | None:
         "active": True,
         "view_as": True,
     }
+
+
+def _lecturer_view_user_from_staff_number(staff_number: str) -> dict | None:
+    return _lecturer_view_user_from_identifier(staff_number)
+
+
+def _staff_number_for_lecturer_id(lecturer_id: int) -> str | None:
+    with get_runtime_connection() as conn:
+        row = conn.execute(
+            convert_placeholders("SELECT staff_number FROM lecturers WHERE id = ?"),
+            (int(lecturer_id),),
+        ).fetchone()
+    row = row_to_dict(row)
+    return str(row["staff_number"]) if row else None
 
 
 def page_login() -> None:
@@ -377,36 +509,37 @@ def page_my_documents() -> None:
     month_label = col2.selectbox("Month", [name for _, name in month_options()], index=1, key="my_docs_month")
     claim_period = resolve_claim_period(int(year), month_number(month_label))
     st.caption(f"Claim/register period for {claim_period.label}: {claim_period.display}")
-    st.caption("The recommended v2 document engine is used automatically.")
-    if st.button("Generate my v2 documents"):
+    st.caption("The recommended document engine is used automatically.")
+    month = month_number(month_label)
+    state_key = document_output_state_key("my_documents", staff_number, int(year), month)
+    if st.button("Generate documents"):
         try:
-            result = render_documents_v2(int(staff_number), int(year), month_number(month_label), current_user=user)
-            log_audit_event("document_generation", user=user, entity_type="lecturer", entity_id=staff_number, details={"year": int(year), "month": month_number(month_label)})
+            result = render_documents_v2(int(staff_number), int(year), month, current_user=user)
+            log_audit_event("document_generation", user=user, entity_type="lecturer", entity_id=staff_number, details={"year": int(year), "month": month})
             output_folder = Path(result["output_dir"])
             zip_path = create_registers_zip(
                 result["register_paths"],
-                output_folder / f"registers_{staff_number}_{int(year)}_{month_number(month_label):02d}.zip",
+                output_folder / f"registers_{staff_number}_{int(year)}_{month:02d}.zip",
             )
             zip_storage = save_generated_file(
                 zip_path,
-                f"generated_v2/{int(year)}/{month_number(month_label):02d}/{staff_number}/{storage_key_for_generated_file(zip_path, output_folder)}",
+                f"generated_v2/{int(year)}/{month:02d}/{staff_number}/{storage_key_for_generated_file(zip_path, output_folder)}",
             ).as_dict()
+            claim_audit = build_claim_completeness_audit(int(staff_number), int(year), month)
+            st.session_state[state_key] = build_document_output_state(
+                result,
+                staff_number,
+                int(year),
+                month,
+                storage_rows=[*result.get("storage", []), zip_storage],
+                zip_path=zip_path,
+                claim_audit=claim_audit,
+            )
             st.success("Documents generated.")
-            render_path_block("Output folder", result["output_dir"])
-            render_output_file("Claim DOCX", result["claim_path"])
-            if Path(result["claim_path"]).exists():
-                st.download_button(
-                    "Download my claim DOCX",
-                    data=read_file_bytes(result["claim_path"]),
-                    file_name=Path(result["claim_path"]).name,
-                )
-            for path in result["register_paths"]:
-                render_output_file("Attendance register", path)
-            render_output_file("Registers ZIP", zip_path)
-            render_download_button("Download all my registers ZIP", zip_path, "application/zip")
-            render_document_storage_summary([*result.get("storage", []), zip_storage])
         except Exception as exc:
             show_error("My document generation failed.", exc)
+    if st.session_state.get(state_key):
+        render_document_output_state(st.session_state[state_key], owner_label="Latest generated document set for this lecturer/month.")
 
 
 def render_persistent_export_status(
@@ -2053,8 +2186,12 @@ def page_preclaim_verification() -> None:
     if lecturer_id is None:
         return
 
-    with get_connection() as conn:
-        lecturer_row = conn.execute("SELECT staff_number FROM lecturers WHERE id = ?", (int(lecturer_id),)).fetchone()
+    with get_runtime_connection() as conn:
+        lecturer_row = conn.execute(
+            convert_placeholders("SELECT staff_number FROM lecturers WHERE id = ?"),
+            (int(lecturer_id),),
+        ).fetchone()
+    lecturer_row = row_to_dict(lecturer_row)
     if lecturer_row is None:
         st.error("Selected lecturer was not found.")
         return
@@ -2330,7 +2467,17 @@ def page_document_generation() -> None:
     claim_period = resolve_claim_period(int(year), month)
     st.caption(f"Claim/register period for {claim_period.label}: {claim_period.display}")
 
-    if lecturer_id is None or not st.button("Generate documents"):
+    if lecturer_id is None:
+        return
+    selected_staff_number = _staff_number_for_lecturer_id(int(lecturer_id))
+    if selected_staff_number is None:
+        st.error("Selected lecturer was not found.")
+        return
+    state_key = document_output_state_key("admin_documents", selected_staff_number, int(year), month)
+    generate_clicked = st.button("Generate documents")
+    if not generate_clicked:
+        if st.session_state.get(state_key):
+            render_document_output_state(st.session_state[state_key], owner_label="Latest generated document set for this lecturer/month.")
         return
     try:
         if engine == "v2 docxtpl, recommended":
@@ -2346,6 +2493,7 @@ def page_document_generation() -> None:
 
             result = render_documents_v2(lecturer_id, int(year), month)
             sessions_df = generate_monthly_sessions(lecturer_id, int(year), month)
+            claim_audit = audit_claim_completeness_from_data(sessions_df, build_claim_context(sessions_df, int(year), month))
             clashes_df = detect_clashes(sessions_df)
             staff_number = str(sessions_df["staff_number"].iloc[0])
             log_audit_event("document_generation", user=current_user(), entity_type="lecturer", entity_id=staff_number, details={"year": int(year), "month": month, "engine": "v2"})
@@ -2411,12 +2559,24 @@ def page_document_generation() -> None:
                     f"generated_v2/{int(year)}/{month:02d}/{staff_number}/{storage_key_for_generated_file(verification_path, output_folder)}",
                 ).as_dict()
             )
+            storage_rows = [*result.get("storage", []), *extra_storage_rows]
+            st.session_state[state_key] = build_document_output_state(
+                result,
+                staff_number,
+                int(year),
+                month,
+                storage_rows=storage_rows,
+                zip_path=zip_path,
+                verification_path=verification_path,
+                claim_audit=claim_audit,
+            )
             render_download_button(
                 "Download verification checklist Excel",
                 verification_path,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-            render_document_storage_summary([*result.get("storage", []), *extra_storage_rows])
+            render_document_storage_summary(storage_rows)
+            render_claim_completeness_audit(claim_audit)
         else:
             layout_mode = "template" if engine == "legacy template generator" else "generated"
             result = generate_monthly_documents(
@@ -2595,7 +2755,7 @@ def render_view_as_controls(user: dict) -> None:
 
 
 def main() -> None:
-    init_db()
+    init_runtime_db()
     apply_app_theme()
     if enable_debug_stack_traces():
         st.sidebar.checkbox("Show debug stack traces", key="debug_errors")

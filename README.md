@@ -778,6 +778,14 @@ Phase 14.4 production runtime download, storage, UI, and performance notes:
 - Dashboard count lookups use short-lived scoped Streamlit caching to reduce repeated remote PostgreSQL round trips; lecturer-scoped cache keys include the lecturer staff number.
 - Local SQLite remains the default when `DATABASE_URL` is absent.
 
+Phase 14.5.3 PostgreSQL runtime and access-control notes:
+
+- Admin View as lecturer and Course and Group Entry runtime lookups use the provider-aware database path so deployed PostgreSQL reads do not fall back to local SQLite.
+- Generated document output metadata is kept in Streamlit session state so claim, register ZIP, checklist, and object-storage download references remain visible after download-triggered reruns.
+- Lecturer-facing document generation uses the wording `Generate documents` and does not expose the document engine selector.
+- Claim completeness checks compare distinct `course_code` plus `group_name` pairs so duplicate group names under different courses are audited correctly before rendering.
+- Streamlit Cloud platform controls such as Manage app, Logs, Reboot app, Delete app, and Settings are outside the application RBAC; use Streamlit workspace/sharing permissions and an incognito/private viewer check to confirm what lecturers see.
+
 Phase 2.1 privacy notes:
 
 - Session Generation UI hides sensitive lecturer fields such as ID/passport, PAYE, address, contact number, and highest qualification.

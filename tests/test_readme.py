@@ -138,6 +138,9 @@ def test_readme_contains_phase_4_3_wording():
     assert "short-lived signed download links" in readme
     assert "Register ZIP downloads remain visible" in readme
     assert "never renders `DATABASE_URL`" in readme
+    assert "Phase 14.5.3 PostgreSQL runtime and access-control notes" in readme
+    assert "distinct `course_code` plus `group_name` pairs" in readme
+    assert "Streamlit Cloud platform controls" in readme
     assert "future lecturer login access" in readme
     assert "Authentication is not implemented yet" in readme
     assert "Phase 4.2 adds browser-based Course and Group Entry" in readme

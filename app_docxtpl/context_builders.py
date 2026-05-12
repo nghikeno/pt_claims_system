@@ -69,8 +69,8 @@ def build_claim_context(sessions_df: pd.DataFrame, year: int, month: int) -> dic
 
     first = sessions_df.iloc[0]
     claim_rows = []
-    sorted_df = sessions_df.sort_values(["group_name", "session_date", "start_time"])
-    for group_name, group_df in sorted_df.groupby("group_name", sort=True):
+    sorted_df = sessions_df.sort_values(["course_code", "group_name", "session_date", "start_time"])
+    for (course_code, group_name), group_df in sorted_df.groupby(["course_code", "group_name"], sort=True):
         for number, row in enumerate(group_df.to_dict("records"), start=1):
             claim_rows.append(
                 {
@@ -84,6 +84,7 @@ def build_claim_context(sessions_df: pd.DataFrame, year: int, month: int) -> dic
                     "rate": format_compact_number(row["tariff_per_hour"]),
                     "cents": "00",
                     "office_use": "",
+                    "course_code": str(course_code),
                     "group_name": group_name,
                 }
             )
@@ -115,6 +116,8 @@ def build_claim_context(sessions_df: pd.DataFrame, year: int, month: int) -> dic
 
 def _student_rows(group_name: str, course_code: str, staff_number: str | None = None) -> list[dict]:
     students = get_students_for_group(group_name, course_code, staff_number=staff_number)
+    if not students and staff_number:
+        students = get_students_for_group(group_name, course_code)
     if not students:
         students = [
             {"surname": "", "initials": "", "student_number": "", "full_name": ""}

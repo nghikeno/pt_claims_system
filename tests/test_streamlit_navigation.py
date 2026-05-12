@@ -89,4 +89,24 @@ def test_lecturer_documents_do_not_expose_engine_selector():
     lecturer_docs = source.split("def page_my_documents", 1)[1].split("def render_persistent_export_status", 1)[0]
 
     assert "Document engine" not in lecturer_docs
-    assert "v2 document engine is used automatically" in lecturer_docs
+    assert "Generate my v2 documents" not in lecturer_docs
+    assert "Generate documents" in lecturer_docs
+    assert "recommended document engine is used automatically" in lecturer_docs
+
+
+def test_document_generation_output_is_kept_in_session_state():
+    source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
+
+    assert "document_output_state_key" in source
+    assert "st.session_state[state_key]" in source
+    assert "render_document_output_state" in source
+    assert "generate_download_url" in source
+
+
+def test_view_as_lecturer_lookup_is_provider_aware():
+    source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
+    helper = source.split("def _lecturer_view_user_from_identifier", 1)[1].split("def _lecturer_view_user_from_staff_number", 1)[0]
+
+    assert "get_runtime_connection" in helper
+    assert "convert_placeholders" in helper
+    assert "CAST(l.id AS TEXT)" in helper
