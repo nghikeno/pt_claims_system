@@ -1,11 +1,13 @@
 from datetime import date
+import inspect
 
 import pandas as pd
 import pytest
 
 from app.database import get_connection
 from app.seed_data import seed_database
-from app.session_generator import generate_monthly_sessions, get_excluded_dates
+import app.session_generator as session_generator
+from app.session_generator import generate_monthly_sessions, get_excluded_dates, resolve_lecturer_id
 from app.validators import detect_clashes
 
 
@@ -20,6 +22,20 @@ def test_sunday_exclusion():
     assert date(2026, 2, 1) in excluded_dates
     sessions_df = generate_monthly_sessions(1, 2026, 2)
     assert "Sunday" not in set(sessions_df["day_of_week"])
+
+
+def test_resolve_lecturer_id_accepts_staff_number():
+    with get_connection() as conn:
+        row = conn.execute("SELECT id, staff_number FROM lecturers WHERE active = 1 ORDER BY id LIMIT 1").fetchone()
+
+    assert resolve_lecturer_id(row["staff_number"]) == row["id"]
+
+
+def test_session_generator_uses_runtime_database_provider():
+    source = inspect.getsource(session_generator)
+
+    assert "get_runtime_connection" in source
+    assert "get_connection(DB_PATH)" not in source
 
 
 def test_public_holiday_or_closure_exclusion():

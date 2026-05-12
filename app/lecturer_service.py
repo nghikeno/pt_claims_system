@@ -10,7 +10,9 @@ import pandas as pd
 from app.backup_database import backup_database
 from app.config import EXPORTS_DIR
 from app.data_validation import parse_bool, parse_date_value, parse_positive_float
+from app.db_provider import convert_placeholders, get_runtime_connection, row_to_dict, rows_to_dicts
 from app.database import get_connection, init_db
+from app.config import database_provider
 
 
 TITLE_OPTIONS = {"Prof", "Dr", "Mr", "Ms"}
@@ -107,12 +109,17 @@ def validate_lecturer_data(data: dict[str, Any]) -> tuple[bool, list[str]]:
 
 
 def _row_to_dict(row) -> dict | None:
-    return dict(row) if row is not None else None
+    return row_to_dict(row)
+
+
+def _ensure_sqlite_schema() -> None:
+    if database_provider() == "sqlite":
+        init_db()
 
 
 def list_lecturers() -> pd.DataFrame:
-    init_db()
-    with get_connection() as conn:
+    _ensure_sqlite_schema()
+    with get_runtime_connection() as conn:
         rows = conn.execute(
             """
             SELECT l.staff_number, l.title, l.full_name, l.campus, l.tariff_per_hour,
@@ -127,14 +134,14 @@ def list_lecturers() -> pd.DataFrame:
             ORDER BY l.staff_number
             """
         ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
+    return pd.DataFrame(rows_to_dicts(rows))
 
 
 def get_lecturer_by_staff_number(staff_number: str) -> dict | None:
-    init_db()
-    with get_connection() as conn:
+    _ensure_sqlite_schema()
+    with get_runtime_connection() as conn:
         row = conn.execute(
-            "SELECT * FROM lecturers WHERE staff_number = ? ORDER BY id LIMIT 1",
+            convert_placeholders("SELECT * FROM lecturers WHERE staff_number = ? ORDER BY id LIMIT 1"),
             (_clean(staff_number).replace(" ", ""),),
         ).fetchone()
     return _row_to_dict(row)
@@ -144,18 +151,18 @@ def lecturer_exists(staff_number: str) -> bool:
     staff_number = _clean(staff_number).replace(" ", "")
     if not staff_number:
         return False
-    init_db()
-    with get_connection() as conn:
+    _ensure_sqlite_schema()
+    with get_runtime_connection() as conn:
         row = conn.execute(
-            "SELECT 1 FROM lecturers WHERE staff_number = ? LIMIT 1",
+            convert_placeholders("SELECT 1 FROM lecturers WHERE staff_number = ? LIMIT 1"),
             (staff_number,),
         ).fetchone()
     return row is not None
 
 
 def find_duplicate_lecturers() -> pd.DataFrame:
-    init_db()
-    with get_connection() as conn:
+    _ensure_sqlite_schema()
+    with get_runtime_connection() as conn:
         rows = conn.execute(
             """
             SELECT staff_number, COUNT(*) AS count
@@ -165,7 +172,7 @@ def find_duplicate_lecturers() -> pd.DataFrame:
             ORDER BY staff_number
             """
         ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
+    return pd.DataFrame(rows_to_dicts(rows))
 
 
 def create_lecturer(data: dict[str, Any]) -> dict:

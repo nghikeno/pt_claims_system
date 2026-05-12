@@ -1,5 +1,7 @@
 import sqlite3
+import inspect
 
+import app.academic_calendar_service as academic_calendar_service
 from app.academic_calendar_service import (
     calendar_exclusion_applies,
     create_calendar_entry,
@@ -45,6 +47,7 @@ def _seed_calendar_scope_data() -> None:
             VALUES (11, '900011', 'Ms', 'Calendar Lecturer', 'M', 'ID', 'PAYE', 'Address', '081', 440, 'Campus', '2026-01-01', '2026-12-31', 1)
             """
         )
+
         conn.execute(
             """
             INSERT INTO courses (id, course_code, course_name, faculty, department, budget_allocation, active)
@@ -71,6 +74,13 @@ def _seed_calendar_scope_data() -> None:
                  NULL, NULL, 'all', NULL, NULL, NULL, 1, 'Test', 0)
             """
         )
+
+
+def test_calendar_listing_uses_runtime_database_provider():
+    source = inspect.getsource(academic_calendar_service.list_calendar_entries)
+
+    assert "get_runtime_connection" in source
+    assert "convert_placeholders" in source
 
 
 def test_academic_calendar_schema_migration_preserves_existing_rows():

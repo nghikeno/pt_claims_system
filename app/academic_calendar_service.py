@@ -7,7 +7,9 @@ import pandas as pd
 
 from app.audit_service import log_audit_event
 from app.backup_database import backup_database
+from app.config import database_provider
 from app.data_validation import parse_bool, parse_date_value, parse_time_value
+from app.db_provider import convert_placeholders, get_runtime_connection, row_to_dict, rows_to_dicts
 from app.database import get_connection, init_db
 from app.validators import parse_date
 
@@ -69,7 +71,8 @@ def _calendar_type_slug(value: Any) -> str:
 
 
 def ensure_academic_calendar_schema() -> None:
-    init_db()
+    if database_provider() == "sqlite":
+        init_db()
 
 
 def list_calendar_entries(active: bool | None = None, calendar_type: str | None = None) -> pd.DataFrame:
@@ -83,9 +86,9 @@ def list_calendar_entries(active: bool | None = None, calendar_type: str | None 
         where.append("lower(ac.calendar_type) = lower(?)")
         params.append(_calendar_type_slug(calendar_type))
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-    with get_connection() as conn:
+    with get_runtime_connection() as conn:
         rows = conn.execute(
-            f"""
+            convert_placeholders(f"""
             SELECT
                 ac.id AS id,
                 ac.id AS calendar_id,
@@ -124,15 +127,15 @@ def list_calendar_entries(active: bool | None = None, calendar_type: str | None 
             LEFT JOIN courses AS c ON c.id = COALESCE(ac.course_id, sg.course_id)
             {where_sql}
             ORDER BY ac.start_date DESC, ac.start_time, ac.calendar_type, ac.id DESC
-            """,
+            """),
             tuple(params),
         ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
+    return pd.DataFrame(rows_to_dicts(rows))
 
 
 def calendar_summary_counts() -> pd.DataFrame:
     ensure_academic_calendar_schema()
-    with get_connection() as conn:
+    with get_runtime_connection() as conn:
         rows = conn.execute(
             """
             SELECT ac.calendar_type AS calendar_type, COALESCE(ac.active, 1) AS active, COUNT(*) AS count
@@ -141,14 +144,14 @@ def calendar_summary_counts() -> pd.DataFrame:
             ORDER BY ac.calendar_type, active DESC
             """
         ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
+    return pd.DataFrame(rows_to_dicts(rows))
 
 
 def get_calendar_entry(entry_id: int) -> dict | None:
     ensure_academic_calendar_schema()
-    with get_connection() as conn:
-        row = conn.execute("SELECT ac.* FROM academic_calendar AS ac WHERE ac.id = ?", (int(entry_id),)).fetchone()
-    return dict(row) if row else None
+    with get_runtime_connection() as conn:
+        row = conn.execute(convert_placeholders("SELECT ac.* FROM academic_calendar AS ac WHERE ac.id = ?"), (int(entry_id),)).fetchone()
+    return row_to_dict(row)
 
 
 def validate_calendar_data(data: dict[str, Any], exclude_id: int | None = None) -> tuple[bool, list[str]]:
@@ -177,21 +180,21 @@ def validate_calendar_data(data: dict[str, Any], exclude_id: int | None = None) 
         errors.append("End time must be after start time.")
     if scope_type not in SCOPE_TYPES:
         errors.append("Scope must be all, lecturer, course, or group.")
-    with get_connection() as conn:
+    with get_runtime_connection() as conn:
         if scope_type == "lecturer":
             if not data.get("lecturer_id"):
                 errors.append("Lecturer scope requires a valid lecturer.")
-            elif conn.execute("SELECT 1 FROM lecturers WHERE id = ?", (int(data["lecturer_id"]),)).fetchone() is None:
+            elif conn.execute(convert_placeholders("SELECT 1 FROM lecturers WHERE id = ?"), (int(data["lecturer_id"]),)).fetchone() is None:
                 errors.append("Lecturer scope requires a valid lecturer.")
         if scope_type == "course":
             if not data.get("course_id"):
                 errors.append("Course scope requires a valid course.")
-            elif conn.execute("SELECT 1 FROM courses WHERE id = ?", (int(data["course_id"]),)).fetchone() is None:
+            elif conn.execute(convert_placeholders("SELECT 1 FROM courses WHERE id = ?"), (int(data["course_id"]),)).fetchone() is None:
                 errors.append("Course scope requires a valid course.")
         if scope_type == "group":
             if not data.get("group_id"):
                 errors.append("Group scope requires a valid group.")
-            elif conn.execute("SELECT 1 FROM student_groups WHERE id = ? AND lecturer_id IS NOT NULL", (int(data["group_id"]),)).fetchone() is None:
+            elif conn.execute(convert_placeholders("SELECT 1 FROM student_groups WHERE id = ? AND lecturer_id IS NOT NULL"), (int(data["group_id"]),)).fetchone() is None:
                 errors.append("Group scope requires a valid group.")
     if not errors:
         duplicate_params: list[Any] = [
@@ -209,9 +212,9 @@ def validate_calendar_data(data: dict[str, Any], exclude_id: int | None = None) 
         if exclude_id is not None:
             exclude_sql = "AND ac.id <> ?"
             duplicate_params.append(int(exclude_id))
-        with get_connection() as conn:
+        with get_runtime_connection() as conn:
             row = conn.execute(
-                f"""
+                convert_placeholders(f"""
                 SELECT ac.id AS id FROM academic_calendar AS ac
                 WHERE ac.title = ? AND ac.start_date = ? AND ac.end_date = ?
                   AND COALESCE(ac.start_time, '') = COALESCE(?, '')
@@ -223,7 +226,7 @@ def validate_calendar_data(data: dict[str, Any], exclude_id: int | None = None) 
                   AND COALESCE(ac.active, 1) = 1
                   {exclude_sql}
                 LIMIT 1
-                """,
+                """),
                 tuple(duplicate_params),
             ).fetchone()
         if row:
@@ -360,9 +363,9 @@ def calendar_exclusion_applies(row: dict[str, Any], session: dict[str, Any]) -> 
 
 def fetch_calendar_exclusions_for_period(start_date: str, end_date: str) -> list[dict[str, Any]]:
     ensure_academic_calendar_schema()
-    with get_connection() as conn:
+    with get_runtime_connection() as conn:
         rows = conn.execute(
-            """
+            convert_placeholders("""
             SELECT ac.*
             FROM academic_calendar AS ac
             WHERE lower(ac.action) = 'exclude'
@@ -370,7 +373,7 @@ def fetch_calendar_exclusions_for_period(start_date: str, end_date: str) -> list
               AND COALESCE(ac.exclude_from_claims_and_registers, 1) = 1
               AND date(ac.start_date) <= date(?)
               AND date(ac.end_date) >= date(?)
-            """,
+            """),
             (end_date, start_date),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return rows_to_dicts(rows)

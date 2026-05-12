@@ -326,8 +326,8 @@ def table_df(table: str, limit: int = 500) -> pd.DataFrame:
 
 
 def lecturers_for_selector() -> pd.DataFrame:
-    init_db()
-    with get_connection() as conn:
+    init_runtime_db()
+    with get_runtime_connection() as conn:
         rows = conn.execute(
             """
             SELECT id, staff_number, full_name
@@ -336,7 +336,7 @@ def lecturers_for_selector() -> pd.DataFrame:
             ORDER BY staff_number
             """
         ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
+    return pd.DataFrame(rows_to_dicts(rows))
 
 
 def save_uploaded_workbook(uploaded_file, uploads_dir: Path = UPLOADS_DIR) -> Path:

@@ -7,8 +7,8 @@ import pandas as pd
 
 from app.academic_calendar_service import calendar_exclusion_applies, fetch_calendar_exclusions_for_period
 from app.claim_period_service import resolve_claim_period
-from app.config import DB_PATH, EXPORTS_DIR
-from app.database import get_connection
+from app.config import EXPORTS_DIR
+from app.db_provider import convert_placeholders, get_runtime_connection, row_to_dict, rows_to_dicts
 from app.export_excel import export_sessions_to_excel
 from app.validators import calculate_hours, detect_clashes, parse_date
 
@@ -43,9 +43,9 @@ def get_excluded_dates(year: int, month: int) -> set[date]:
     period_start, period_end = claim_period.start_date, claim_period.end_date
     excluded = {day for day in dates_between(period_start, period_end) if day.weekday() == DAY_NAMES["Sunday"]}
 
-    with get_connection(DB_PATH) as conn:
+    with get_runtime_connection() as conn:
         rows = conn.execute(
-            """
+            convert_placeholders("""
             SELECT start_date, end_date
             FROM academic_calendar
             WHERE lower(action) = 'exclude'
@@ -56,11 +56,12 @@ def get_excluded_dates(year: int, month: int) -> set[date]:
               AND COALESCE(end_time, '') = ''
               AND date(start_date) <= date(?)
               AND date(end_date) >= date(?)
-            """,
+            """),
             (period_end.isoformat(), period_start.isoformat()),
         ).fetchall()
 
     for row in rows:
+        row = row_to_dict(row) or {}
         start = max(parse_date(row["start_date"]), period_start)
         end = min(parse_date(row["end_date"]), period_end)
         excluded.update(dates_between(start, end))
@@ -68,39 +69,39 @@ def get_excluded_dates(year: int, month: int) -> set[date]:
 
 
 def resolve_lecturer_id(lecturer_identifier: int) -> int:
-    with get_connection(DB_PATH) as conn:
+    with get_runtime_connection() as conn:
         by_id = conn.execute(
-            "SELECT * FROM lecturers WHERE id = ? AND active = 1",
+            convert_placeholders("SELECT * FROM lecturers WHERE id = ? AND active = 1"),
             (lecturer_identifier,),
         ).fetchone()
         if by_id is not None:
-            return int(by_id["id"])
+            return int((row_to_dict(by_id) or {})["id"])
         by_staff = conn.execute(
-            "SELECT id FROM lecturers WHERE staff_number = ? AND active = 1",
+            convert_placeholders("SELECT id FROM lecturers WHERE staff_number = ? AND active = 1"),
             (str(lecturer_identifier),),
         ).fetchone()
         if by_staff is not None:
-            return int(by_staff["id"])
+            return int((row_to_dict(by_staff) or {})["id"])
     raise ValueError(f"No active lecturer found for id or staff number {lecturer_identifier}")
 
 
 def _fetch_lecturer(lecturer_id: int) -> dict:
     resolved_lecturer_id = resolve_lecturer_id(lecturer_id)
-    with get_connection(DB_PATH) as conn:
+    with get_runtime_connection() as conn:
         row = conn.execute(
-            "SELECT * FROM lecturers WHERE id = ? AND active = 1",
+            convert_placeholders("SELECT * FROM lecturers WHERE id = ? AND active = 1"),
             (resolved_lecturer_id,),
         ).fetchone()
     if row is None:
         raise ValueError(f"No active lecturer found for id {lecturer_id}")
-    return dict(row)
+    return row_to_dict(row) or {}
 
 
 def _fetch_timetable_entries(lecturer_id: int) -> list[dict]:
     resolved_lecturer_id = resolve_lecturer_id(lecturer_id)
-    with get_connection(DB_PATH) as conn:
+    with get_runtime_connection() as conn:
         rows = conn.execute(
-            """
+            convert_placeholders("""
             SELECT
                 te.*,
                 sg.group_name,
@@ -118,10 +119,10 @@ def _fetch_timetable_entries(lecturer_id: int) -> list[dict]:
               AND te.active = 1
               AND sg.active = 1
               AND c.active = 1
-            """,
+            """),
             (resolved_lecturer_id,),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return rows_to_dicts(rows)
 
 
 def generate_monthly_sessions(lecturer_id: int, year: int, month: int) -> pd.DataFrame:

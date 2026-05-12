@@ -1,7 +1,9 @@
 import pandas as pd
 import pytest
 import zipfile
+import inspect
 
+import app_ui.ui_helpers as ui_helpers
 from app.dev_reset import dev_reset
 from app_docxtpl.manual_templates import MANUAL_CLAIM_TEMPLATE_V2, MANUAL_REGISTER_TEMPLATE_V2
 from app_ui.ui_helpers import (
@@ -142,6 +144,13 @@ def test_lecturer_display_details_returns_full_name_and_staff_number():
     details = lecturer_display_details(df)
 
     assert details == {"lecturer": "Maria Matias", "staff_number": "1008977"}
+
+
+def test_lecturer_selector_helper_uses_runtime_database_provider():
+    source = inspect.getsource(ui_helpers.lecturers_for_selector)
+
+    assert "get_runtime_connection" in source
+    assert "get_connection" not in source
 
 
 def test_lecturer_option_label_uses_staff_number_and_name():
