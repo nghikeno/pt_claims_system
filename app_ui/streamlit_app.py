@@ -42,7 +42,7 @@ from app.config import (
     session_timeout_minutes,
 )
 from app.claim_period_service import resolve_claim_period
-from app.claim_completeness_service import audit_claim_completeness_from_data, build_claim_completeness_audit
+from app.claim_completeness_service import audit_claim_completeness_from_data
 from app.course_group_service import (
     course_exists,
     create_course,
@@ -266,6 +266,124 @@ def build_document_output_state(
         "storage": list(storage_rows or result.get("storage", [])),
         "claim_audit": claim_audit or {},
     }
+
+
+class DocumentGenerationComponentError(RuntimeError):
+    def __init__(self, component: str, original: Exception) -> None:
+        self.component = component
+        self.original = original
+        super().__init__(f"{component}: {type(original).__name__}: {original}")
+
+
+def _safe_error_text(exc: Exception) -> str:
+    text = str(exc)
+    replacements = ["DATABASE_URL", "OBJECT_STORAGE_ACCESS_KEY_ID", "OBJECT_STORAGE_SECRET_ACCESS_KEY"]
+    for item in replacements:
+        text = text.replace(item, "[redacted]")
+    if "://" in text and "s3://" not in text:
+        return f"{type(exc).__name__}: connection/configuration detail redacted"
+    return f"{type(exc).__name__}: {text}"
+
+
+def _generation_step(component: str, func, *args, **kwargs):
+    try:
+        return func(*args, **kwargs)
+    except Exception as exc:
+        print(f"DOCUMENT_GENERATION_ERROR component={component} detail={_safe_error_text(exc)}")
+        raise DocumentGenerationComponentError(component, exc) from exc
+
+
+def generate_v2_document_output_state(
+    lecturer_identifier: int | str,
+    year: int,
+    month: int,
+    *,
+    current_user_for_render: dict | None = None,
+    audit_user: dict | None = None,
+    include_verification_checklist: bool = False,
+) -> dict:
+    result = _generation_step(
+        "v2 document render",
+        render_documents_v2,
+        int(lecturer_identifier),
+        int(year),
+        int(month),
+        current_user=current_user_for_render,
+    )
+    sessions_df = _generation_step("session reload", generate_monthly_sessions, int(lecturer_identifier), int(year), int(month))
+    if sessions_df.empty:
+        raise DocumentGenerationComponentError("session reload", ValueError("No generated sessions found."))
+    staff_number = str(sessions_df["staff_number"].iloc[0])
+    claim_audit = _generation_step(
+        "claim completeness audit",
+        audit_claim_completeness_from_data,
+        sessions_df,
+        build_claim_context(sessions_df, int(year), int(month)),
+    )
+    output_folder = Path(result["output_dir"])
+    zip_path = _generation_step(
+        "register ZIP creation",
+        create_registers_zip,
+        result["register_paths"],
+        output_folder / f"registers_{staff_number}_{int(year)}_{int(month):02d}.zip",
+    )
+    storage_rows = list(result.get("storage", []))
+    zip_storage = _generation_step(
+        "storage upload",
+        save_generated_file,
+        zip_path,
+        f"generated_v2/{int(year)}/{int(month):02d}/{staff_number}/{storage_key_for_generated_file(zip_path, output_folder)}",
+    ).as_dict()
+    storage_rows.append(zip_storage)
+    verification_path = None
+    if include_verification_checklist:
+        clashes_df = _generation_step("clash detection", detect_clashes, sessions_df)
+        verification_path = output_folder / f"verification_checklist_{staff_number}_{int(year)}_{int(month):02d}.xlsx"
+        _generation_step(
+            "verification checklist",
+            generate_verification_checklist,
+            sessions_df,
+            clashes_df,
+            verification_path,
+            int(year),
+            int(month),
+            True,
+            "Generated with v2 docxtpl",
+            "Verification checklist generated from Streamlit v2 docxtpl workflow.",
+        )
+        checklist_storage = _generation_step(
+            "storage upload",
+            save_generated_file,
+            verification_path,
+            f"generated_v2/{int(year)}/{int(month):02d}/{staff_number}/{storage_key_for_generated_file(verification_path, output_folder)}",
+        ).as_dict()
+        storage_rows.append(checklist_storage)
+    log_audit_event(
+        "document_generation",
+        user=audit_user,
+        entity_type="lecturer",
+        entity_id=staff_number,
+        details={"year": int(year), "month": int(month), "engine": "v2"},
+    )
+    return build_document_output_state(
+        result,
+        staff_number,
+        int(year),
+        int(month),
+        storage_rows=storage_rows,
+        zip_path=zip_path,
+        verification_path=verification_path,
+        claim_audit=claim_audit,
+    )
+
+
+def show_document_generation_error(prefix: str, exc: Exception) -> None:
+    if isinstance(exc, DocumentGenerationComponentError):
+        st.error(f"{prefix} failed during {exc.component}.")
+        if st.session_state.get("debug_errors", False):
+            st.code(_safe_error_text(exc.original), language="text")
+        return
+    show_error(prefix + " failed.", exc)
 
 
 def render_claim_completeness_audit(audit: dict | None) -> None:
@@ -514,30 +632,17 @@ def page_my_documents() -> None:
     state_key = document_output_state_key("my_documents", staff_number, int(year), month)
     if st.button("Generate documents"):
         try:
-            result = render_documents_v2(int(staff_number), int(year), month, current_user=user)
-            log_audit_event("document_generation", user=user, entity_type="lecturer", entity_id=staff_number, details={"year": int(year), "month": month})
-            output_folder = Path(result["output_dir"])
-            zip_path = create_registers_zip(
-                result["register_paths"],
-                output_folder / f"registers_{staff_number}_{int(year)}_{month:02d}.zip",
-            )
-            zip_storage = save_generated_file(
-                zip_path,
-                f"generated_v2/{int(year)}/{month:02d}/{staff_number}/{storage_key_for_generated_file(zip_path, output_folder)}",
-            ).as_dict()
-            claim_audit = build_claim_completeness_audit(int(staff_number), int(year), month)
-            st.session_state[state_key] = build_document_output_state(
-                result,
+            st.session_state[state_key] = generate_v2_document_output_state(
                 staff_number,
                 int(year),
                 month,
-                storage_rows=[*result.get("storage", []), zip_storage],
-                zip_path=zip_path,
-                claim_audit=claim_audit,
+                current_user_for_render=user,
+                audit_user=user,
+                include_verification_checklist=False,
             )
             st.success("Documents generated.")
         except Exception as exc:
-            show_error("My document generation failed.", exc)
+            show_document_generation_error("My document generation", exc)
     if st.session_state.get(state_key):
         render_document_output_state(st.session_state[state_key], owner_label="Latest generated document set for this lecturer/month.")
 
@@ -2491,92 +2596,15 @@ def page_document_generation() -> None:
                 )
                 return
 
-            result = render_documents_v2(lecturer_id, int(year), month)
-            sessions_df = generate_monthly_sessions(lecturer_id, int(year), month)
-            claim_audit = audit_claim_completeness_from_data(sessions_df, build_claim_context(sessions_df, int(year), month))
-            clashes_df = detect_clashes(sessions_df)
-            staff_number = str(sessions_df["staff_number"].iloc[0])
-            log_audit_event("document_generation", user=current_user(), entity_type="lecturer", entity_id=staff_number, details={"year": int(year), "month": month, "engine": "v2"})
-            output_folder = v2_output_folder_for(staff_number, int(year), month)
-            verification_path = output_folder / f"verification_checklist_{staff_number}_{int(year)}_{month:02d}.xlsx"
-            generate_verification_checklist(
-                sessions_df,
-                clashes_df,
-                verification_path,
+            st.session_state[state_key] = generate_v2_document_output_state(
+                selected_staff_number,
                 int(year),
                 month,
-                documents_generated=True,
-                generation_status="Generated with v2 docxtpl",
-                notes="Verification checklist generated from Streamlit v2 docxtpl workflow.",
+                audit_user=current_user(),
+                include_verification_checklist=True,
             )
-            zip_path = create_registers_zip(
-                result["register_paths"],
-                output_folder / f"registers_{staff_number}_{int(year)}_{month:02d}.zip",
-            )
-            extra_storage_rows = [
-                save_generated_file(zip_path, f"generated_v2/{int(year)}/{month:02d}/{staff_number}/{storage_key_for_generated_file(zip_path, output_folder)}").as_dict(),
-            ]
-
-            st.success("v2 docxtpl documents generated successfully.")
-            st.subheader("Output folder")
-            render_path_block("Output folder", output_folder)
-
-            st.subheader("Claim DOCX")
-            claim_path = Path(result["claim_path"])
-            render_file_metadata(claim_path)
-            render_download_button(
-                "Download claim DOCX",
-                claim_path,
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
-
-            st.subheader("Attendance registers")
-            registers_folder = output_folder / "registers"
-            render_path_block("Registers folder", registers_folder)
-            st.write(f"Number of register files: {len(result['register_paths'])}")
-            st.dataframe(
-                pd.DataFrame(
-                    [
-                        {
-                            "register_file": Path(path).name,
-                            "path": str(path),
-                            "size": get_file_metadata(path)["size_display"],
-                            "modified": get_file_metadata(path)["modified_timestamp_display"],
-                        }
-                        for path in result["register_paths"]
-                    ]
-                ),
-                width="stretch",
-            )
-            render_file_metadata(zip_path)
-            render_download_button("Download all registers ZIP", zip_path, "application/zip")
-
-            st.subheader("Verification checklist")
-            render_file_metadata(verification_path)
-            extra_storage_rows.append(
-                save_generated_file(
-                    verification_path,
-                    f"generated_v2/{int(year)}/{month:02d}/{staff_number}/{storage_key_for_generated_file(verification_path, output_folder)}",
-                ).as_dict()
-            )
-            storage_rows = [*result.get("storage", []), *extra_storage_rows]
-            st.session_state[state_key] = build_document_output_state(
-                result,
-                staff_number,
-                int(year),
-                month,
-                storage_rows=storage_rows,
-                zip_path=zip_path,
-                verification_path=verification_path,
-                claim_audit=claim_audit,
-            )
-            render_download_button(
-                "Download verification checklist Excel",
-                verification_path,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-            render_document_storage_summary(storage_rows)
-            render_claim_completeness_audit(claim_audit)
+            st.success("Documents generated successfully.")
+            render_document_output_state(st.session_state[state_key], owner_label="Latest generated document set for this lecturer/month.")
         else:
             layout_mode = "template" if engine == "legacy template generator" else "generated"
             result = generate_monthly_documents(
@@ -2606,7 +2634,7 @@ def page_document_generation() -> None:
         elif "template" in text.lower() and "missing" in text.lower():
             show_error("Missing DOCX template. Copy the approved templates to data/docx_templates/.", exc)
         else:
-            show_error("Document generation failed.", exc)
+            show_document_generation_error("Document generation", exc)
 
 
 def page_maria_pilot() -> None:

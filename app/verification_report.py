@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.database import get_connection
+from app.db_provider import convert_placeholders, get_runtime_connection, rows_to_dicts
 from app.docx_utils import ensure_parent, format_month_year
 from app.session_generator import dates_between, month_bounds
 
@@ -30,19 +30,19 @@ def get_excluded_date_details(year: int, month: int) -> pd.DataFrame:
         if current_date.weekday() == 6:
             rows.append({"date": current_date.isoformat(), "reason": "Sunday", "source": "system_default"})
 
-    with get_connection() as conn:
+    with get_runtime_connection() as conn:
         calendar_rows = conn.execute(
-            """
+            convert_placeholders("""
             SELECT title, start_date, end_date, calendar_type
             FROM academic_calendar
             WHERE lower(action) = 'exclude'
               AND date(start_date) <= date(?)
               AND date(end_date) >= date(?)
-            """,
+            """),
             (month_end.isoformat(), month_start.isoformat()),
         ).fetchall()
 
-    for row in calendar_rows:
+    for row in rows_to_dicts(calendar_rows):
         start = max(date.fromisoformat(row["start_date"]), month_start)
         end = min(date.fromisoformat(row["end_date"]), month_end)
         for current_date in dates_between(start, end):

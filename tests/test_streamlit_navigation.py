@@ -103,6 +103,28 @@ def test_document_generation_output_is_kept_in_session_state():
     assert "generate_download_url" in source
 
 
+def test_admin_and_lecturer_documents_use_shared_v2_generation_helper():
+    source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
+    lecturer_docs = source.split("def page_my_documents", 1)[1].split("def render_persistent_export_status", 1)[0]
+    admin_docs = source.split("def page_document_generation", 1)[1].split("def page_maria_pilot", 1)[0]
+
+    assert "def generate_v2_document_output_state" in source
+    assert "generate_v2_document_output_state(" in lecturer_docs
+    assert "generate_v2_document_output_state(" in admin_docs
+    assert "include_verification_checklist=True" in admin_docs
+    assert "include_verification_checklist=False" in lecturer_docs
+    assert "render_documents_v2(" not in admin_docs
+
+
+def test_admin_document_generation_has_component_safe_error_reporting():
+    source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
+    admin_docs = source.split("def page_document_generation", 1)[1].split("def page_maria_pilot", 1)[0]
+
+    assert "DocumentGenerationComponentError" in source
+    assert "failed during" in source
+    assert "show_document_generation_error" in admin_docs
+
+
 def test_view_as_lecturer_lookup_is_provider_aware():
     source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
     helper = source.split("def _lecturer_view_user_from_identifier", 1)[1].split("def _lecturer_view_user_from_staff_number", 1)[0]
