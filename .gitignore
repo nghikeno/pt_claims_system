@@ -1,0 +1,56 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Local databases and real data
+data/*.db
+data/backups/
+data/exports/
+data/generated/
+data/generated_v2/
+data/staging/
+data/real_imports/
+data/source_contracts/
+data/pilots/
+
+# Keep document templates needed by the app
+!data/docx_templates/
+!data/docx_templates/**
+!data/docx_templates_v2/
+!data/docx_templates_v2/**
+
+# Recovery packs and archives
+*.zip
+RECOVERY_PACK_*/
+SAFETY_*.zip
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local recovery/debug reports and scripts
+recovery_*.txt
+recovery_*.py
+inspect_course_group_schema.py
+inspect_course_group_state.py
+
+# Local phase notes, may contain real operational details
+PHASE_*_NOTE_*.txt
+PHASE_*_VERIFICATION_NOTE_*.txt
+
+# Root-level Word samples, keep real templates only under data/docx_templates*
+*.docx
+!data/docx_templates/*.docx
+!data/docx_templates_v2/*.docx

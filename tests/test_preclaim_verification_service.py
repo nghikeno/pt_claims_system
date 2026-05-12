@@ -1,0 +1,179 @@
+from pathlib import Path
+
+import pandas as pd
+
+from app.database import get_connection, init_db
+from app.preclaim_verification_service import build_preclaim_verification, export_preclaim_verification_report
+
+
+def _reset_preclaim_db(
+    *,
+    lecturer_active: int = 1,
+    with_group: bool = True,
+    with_timetable: bool = True,
+    with_enrolments: bool = True,
+    contract_start: str = "2026-01-01",
+    contract_end: str = "2026-12-31",
+    clash: bool = False,
+) -> None:
+    init_db()
+    with get_connection() as conn:
+        for table in [
+            "audit_logs",
+            "user_accounts",
+            "academic_calendar",
+            "group_enrolments",
+            "students",
+            "timetable_entries",
+            "student_groups",
+            "courses",
+            "lecturers",
+        ]:
+            conn.execute(f"DELETE FROM {table}")
+        conn.execute(
+            """
+            INSERT INTO lecturers (
+                id, staff_number, title, full_name, highest_qualification,
+                id_or_passport_number, paye_number, physical_address, contact_number,
+                tariff_per_hour, campus, contract_start_date, contract_end_date, active
+            )
+            VALUES (1, '900001', 'Ms', 'Preclaim Lecturer', 'M', 'SECRET-ID', 'SECRET-PAYE', 'Address', '081', 440, 'Campus', ?, ?, ?)
+            """,
+            (contract_start, contract_end, lecturer_active),
+        )
+        conn.execute(
+            """
+            INSERT INTO courses (id, course_code, course_name, faculty, department, budget_allocation, active)
+            VALUES (1, 'PRE101', 'Preclaim Course', 'Faculty', 'Department', 'BUD', 1)
+            """
+        )
+        if with_group:
+            conn.execute(
+                """
+                INSERT INTO student_groups (id, group_name, course_id, lecturer_id, campus, study_mode, active)
+                VALUES (1, 'PRE_GROUP', 1, 1, 'Campus', 'Full-time', 1)
+                """
+            )
+        if with_timetable and with_group:
+            conn.execute(
+                """
+                INSERT INTO timetable_entries (
+                    lecturer_id, group_id, day_of_week, start_time, end_time,
+                    effective_start_date, effective_end_date, active
+                )
+                VALUES (1, 1, 'Monday', '10:00', '11:00', '2026-11-01', '2026-11-30', 1)
+                """
+            )
+            if clash:
+                conn.execute(
+                    """
+                    INSERT INTO timetable_entries (
+                        lecturer_id, group_id, day_of_week, start_time, end_time,
+                        effective_start_date, effective_end_date, active
+                    )
+                    VALUES (1, 1, 'Monday', '10:30', '11:30', '2026-11-01', '2026-11-30', 1)
+                    """
+                )
+        if with_enrolments and with_group:
+            conn.execute(
+                "INSERT INTO students (id, student_number, surname, initials, full_name, active) VALUES (1, 'STU1', 'Demo', 'A', 'Demo A', 1)"
+            )
+            conn.execute("INSERT INTO group_enrolments (student_id, group_id, active) VALUES (1, 1, 1)")
+
+
+def test_preclaim_verification_passes_for_complete_month():
+    _reset_preclaim_db()
+
+    result = build_preclaim_verification("900001", 2026, 11)
+
+    assert result["status"] == "PASS"
+    assert result["blockers"] == []
+    assert result["summary"]["total_claimable_sessions"] > 0
+    assert result["summary"]["total_claimable_hours"] > 0
+
+
+def test_inactive_lecturer_blocks_verification():
+    _reset_preclaim_db(lecturer_active=0)
+
+    result = build_preclaim_verification("900001", 2026, 11)
+
+    assert result["status"] == "BLOCK"
+    assert "Lecturer is inactive." in result["blockers"]
+
+
+def test_no_active_groups_blocks_verification():
+    _reset_preclaim_db(with_group=False, with_timetable=False, with_enrolments=False)
+
+    result = build_preclaim_verification("900001", 2026, 11)
+
+    assert result["status"] == "BLOCK"
+    assert "No active lecturer-scoped groups exist for this lecturer." in result["blockers"]
+
+
+def test_no_timetable_entries_blocks_verification():
+    _reset_preclaim_db(with_timetable=False)
+
+    result = build_preclaim_verification("900001", 2026, 11)
+
+    assert result["status"] == "BLOCK"
+    assert "No active timetable entries exist for this lecturer." in result["blockers"]
+
+
+def test_zero_enrolments_warns():
+    _reset_preclaim_db(with_enrolments=False)
+
+    result = build_preclaim_verification("900001", 2026, 11)
+
+    assert result["status"] == "WARN"
+    assert "One or more active groups have zero active enrolments." in result["warnings"]
+
+
+def test_month_outside_contract_blocks():
+    _reset_preclaim_db(contract_start="2026-01-01", contract_end="2026-01-31")
+
+    result = build_preclaim_verification("900001", 2026, 11)
+
+    assert result["status"] == "BLOCK"
+    assert "Selected month is completely outside the lecturer contract period." in result["blockers"]
+
+
+def test_partial_contract_overlap_warns():
+    _reset_preclaim_db(contract_start="2026-11-15", contract_end="2026-12-31")
+
+    result = build_preclaim_verification("900001", 2026, 11)
+
+    assert result["status"] == "WARN"
+    assert "Selected month only partially overlaps the lecturer contract period." in result["warnings"]
+
+
+def test_clashes_block_verification():
+    _reset_preclaim_db(clash=True)
+
+    result = build_preclaim_verification("900001", 2026, 11)
+
+    assert result["status"] == "BLOCK"
+    assert "Timetable clashes exist in generated sessions." in result["blockers"]
+
+
+def test_zero_generated_sessions_warns():
+    _reset_preclaim_db(contract_start="2026-11-01", contract_end="2026-11-01")
+
+    result = build_preclaim_verification("900001", 2026, 11)
+
+    assert result["status"] in {"WARN", "BLOCK"}
+    assert "Generated session count is zero." in result["warnings"]
+
+
+def test_export_preclaim_report_excludes_sensitive_fields(tmp_path):
+    _reset_preclaim_db()
+    result = build_preclaim_verification("900001", 2026, 11)
+    result["tables"]["sensitive_check"] = pd.DataFrame(
+        [{"staff_number": "900001", "id_or_passport_number": "SECRET-ID", "paye_number": "SECRET-PAYE"}]
+    )
+
+    output = export_preclaim_verification_report(result, output_dir=tmp_path)
+    text = Path(output).read_text(encoding="utf-8-sig")
+
+    assert "SECRET-ID" not in text
+    assert "SECRET-PAYE" not in text
+    assert "password_hash" not in text
