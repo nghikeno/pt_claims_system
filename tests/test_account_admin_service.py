@@ -1,5 +1,3 @@
-import pytest
-
 from app.account_admin_service import reset_user_password
 from app.auth_service import authenticate_user, create_or_update_user_account, lecturer_id_for_staff_number
 from app.audit_service import list_audit_events
@@ -33,6 +31,8 @@ def test_admin_can_reset_lecturer_password_and_force_change():
 
     result = reset_user_password(admin, "100718", "TempPass2026", "TempPass2026")
 
+    assert result["success"] is True
+    assert result["stage"] == "complete"
     assert result["must_change_password"] == 1
     assert authenticate_user("100718", "OldPass2026") is None
     lecturer = authenticate_user("100718", "TempPass2026")
@@ -47,8 +47,10 @@ def test_lecturer_cannot_reset_password():
     create_or_update_user_account("100718", "OldPass2026", "lecturer", lecturer_id, must_change_password=False)
     lecturer = authenticate_user("100718", "OldPass2026")
 
-    with pytest.raises(PermissionError):
-        reset_user_password(lecturer, "100718", "TempPass2026", "TempPass2026")
+    result = reset_user_password(lecturer, "100718", "TempPass2026", "TempPass2026")
+
+    assert result["success"] is False
+    assert result["stage"] == "authorisation"
 
 
 def test_reset_preserves_username_role_and_lecturer_id():
@@ -73,7 +75,7 @@ def test_reset_preserves_username_role_and_lecturer_id():
 
 
 def test_reset_uses_provider_connection_and_commits_postgresql_style(monkeypatch):
-    state = {"committed": False, "updated_params": None}
+    state = {"committed": False, "updated_params": None, "select_count": 0}
 
     class FakeResult:
         def __init__(self, row=None):
@@ -91,7 +93,19 @@ def test_reset_uses_provider_connection_and_commits_postgresql_style(monkeypatch
 
         def execute(self, sql, params=()):
             if str(sql).strip().upper().startswith("SELECT"):
-                return FakeResult({"id": 7, "username": "100718", "role": "lecturer", "lecturer_id": 3})
+                state["select_count"] += 1
+                if state["select_count"] == 1:
+                    return FakeResult({"id": 7, "username": "100718", "role": "lecturer", "lecturer_id": 3})
+                return FakeResult(
+                    {
+                        "username": "100718",
+                        "role": "lecturer",
+                        "lecturer_id": 3,
+                        "must_change_password": 1,
+                        "password_hash": state["updated_params"][0],
+                        "password_salt": state["updated_params"][1],
+                    }
+                )
             state["updated_params"] = params
             return FakeResult()
 
@@ -105,7 +119,9 @@ def test_reset_uses_provider_connection_and_commits_postgresql_style(monkeypatch
 
     result = reset_user_password(admin, "100718", "TempPass2026", "TempPass2026")
 
-    assert result == {"username": "100718", "must_change_password": 1}
+    assert result["success"] is True
+    assert result["username"] == "100718"
+    assert result["must_change_password"] == 1
     assert state["committed"] is True
     assert state["updated_params"][2]
     assert state["updated_params"][3] == "100718"
@@ -125,5 +141,18 @@ def test_reset_audit_failure_does_not_block(monkeypatch):
 
     result = reset_user_password(admin, "100718", "TempPass2026", "TempPass2026")
 
+    assert result["success"] is True
+    assert result["audit_warning"]
     assert result["must_change_password"] == 1
     assert authenticate_user("100718", "TempPass2026")["must_change_password"] is True
+
+
+def test_reset_fails_safely_when_lecturer_account_missing():
+    dev_reset()
+    admin = {"id": 1, "username": "admin", "role": "admin"}
+
+    result = reset_user_password(admin, "100718", "TempPass2026", "TempPass2026")
+
+    assert result["success"] is False
+    assert result["stage"] == "account_lookup"
+    assert "not found" in result["safe_message"]

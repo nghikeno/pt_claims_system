@@ -125,6 +125,15 @@ def test_admin_document_generation_has_component_safe_error_reporting():
     assert "show_document_generation_error" in admin_docs
 
 
+def test_account_management_reset_does_not_use_old_generic_failure_message():
+    source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
+    account_page = source.split("def page_account_management", 1)[1].split("def page_audit_log", 1)[0]
+
+    assert '"Password reset failed."' not in account_page
+    assert "safe_message" in account_page
+    assert "reset_user_password" in account_page
+
+
 def test_view_as_lecturer_lookup_is_provider_aware():
     source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
     helper = source.split("def _lecturer_view_user_from_identifier", 1)[1].split("def _lecturer_view_user_from_staff_number", 1)[0]

@@ -18,7 +18,7 @@ from app.auth_service import (
     count_admin_accounts,
     lecturer_scoped_staff_number,
 )
-from app.account_admin_service import PasswordResetError, list_user_accounts, reset_user_password
+from app.account_admin_service import list_user_accounts, reset_user_password
 from app.academic_calendar_service import (
     CALENDAR_TYPES,
     SCOPE_TYPES,
@@ -2733,13 +2733,13 @@ def page_account_management() -> None:
     confirm_password = st.text_input("Confirm temporary password", type="password", key="account_reset_confirm")
     st.info("The lecturer must change this temporary password at next login. Communicate it outside the system.")
     if st.button("Reset lecturer password"):
-        try:
-            result = reset_user_password(current_user(), labels[selected_label], temp_password, confirm_password)
-            st.success(f"Password reset for {result['username']}. Must change password at next login.")
-        except PasswordResetError as exc:
-            st.error(f"Password reset failed during {exc.component}.")
-        except Exception as exc:
-            show_error("Password reset failed.", exc)
+        result = reset_user_password(current_user(), labels[selected_label], temp_password, confirm_password)
+        if result.get("success"):
+            st.success(result["safe_message"])
+            if result.get("audit_warning"):
+                st.warning(result["audit_warning"])
+        else:
+            st.error(result["safe_message"])
 
 
 def page_audit_log() -> None:
