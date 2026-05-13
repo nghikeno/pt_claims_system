@@ -116,6 +116,7 @@ from app.timetable_service import (
     list_groups_for_timetable,
     list_timetable_entries,
     reactivate_timetable_entry,
+    timetable_group_ownership_message,
     update_timetable_entry,
     validate_timetable_entry,
 )
@@ -1889,6 +1890,11 @@ def page_timetable_entry() -> None:
             format_func=lambda value: lecturer_option_label(lecturer_record_by_staff_number(lecturer_records, value)),
             key="phase_7_1_timetable_staff_number",
         )
+        selected_lecturer_record = lecturer_record_by_staff_number(lecturer_records, selected_staff_number) or {}
+        st.info(
+            f"Selected lecturer: {selected_lecturer_record.get('staff_number', selected_staff_number)} - "
+            f"{selected_lecturer_record.get('full_name', '')}"
+        )
         lecturer_groups = list_groups_for_timetable(selected_staff_number)
         if lecturer_groups.empty:
             st.warning("No lecturer-scoped groups found for this lecturer.")
@@ -1899,14 +1905,18 @@ def page_timetable_entry() -> None:
                 "Group",
                 group_ids,
                 format_func=lambda value: f"{group_lookup[int(value)]['course_code']} - {group_lookup[int(value)]['group_name']}",
-                key="phase_7_1_timetable_group_id",
+                key=f"phase_7_1_timetable_group_id_{selected_staff_number}",
             )
             selected_group = group_lookup[int(selected_group_id)]
+            st.info(
+                f"Selected group: {selected_group['course_code']} - {selected_group['group_name']}\n\n"
+                f"Group lecturer: {selected_group.get('staff_number', '')} - {selected_group.get('lecturer_name', '')}"
+            )
             st.text_input(
                 "Course",
                 value=f"{selected_group['course_code']} - {selected_group['course_name']}",
                 disabled=True,
-                key=f"phase_7_1_timetable_course_{selected_group_id}",
+                key=f"phase_7_1_timetable_course_{selected_staff_number}_{selected_group_id}",
             )
 
             col1, col2, col3 = st.columns(3)
@@ -1931,6 +1941,9 @@ def page_timetable_entry() -> None:
                 "active": active,
             }
             is_valid, errors = validate_timetable_entry(data)
+            ownership_message = timetable_group_ownership_message(selected_staff_number, selected_group_id)
+            if ownership_message and "Group must belong to the selected lecturer." in errors:
+                errors = [ownership_message if error == "Group must belong to the selected lecturer." else error for error in errors]
             if errors:
                 for error in errors:
                     st.warning(error)

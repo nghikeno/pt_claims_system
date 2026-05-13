@@ -18,6 +18,17 @@ def test_timetable_update_tab_exists():
     assert "DELETE TIMETABLE ENTRY" in source
 
 
+def test_timetable_add_group_selection_is_scoped_to_selected_lecturer():
+    source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
+    timetable_page = source.split("def page_timetable_entry", 1)[1].split("def page_student_upload", 1)[0]
+
+    assert "Selected lecturer:" in timetable_page
+    assert "Selected group:" in timetable_page
+    assert "Group lecturer:" in timetable_page
+    assert 'key=f"phase_7_1_timetable_group_id_{selected_staff_number}"' in timetable_page
+    assert "timetable_group_ownership_message" in timetable_page
+
+
 def test_lecturer_navigation_hides_admin_pages():
     source = Path("app_ui/navigation.py").read_text(encoding="utf-8")
 

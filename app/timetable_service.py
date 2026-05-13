@@ -5,9 +5,10 @@ from typing import Any
 import pandas as pd
 
 from app.backup_database import backup_database
+from app.config import database_provider
 from app.data_validation import DAY_NAMES, parse_bool, parse_date_value, parse_time_value
 from app.database import get_connection, init_db
-from app.db_provider import convert_placeholders, get_runtime_connection, init_runtime_db, rows_to_dicts
+from app.db_provider import convert_placeholders, get_runtime_connection, init_runtime_db, row_to_dict, rows_to_dicts
 
 
 def _clean(value: Any) -> str:
@@ -40,8 +41,10 @@ def list_groups_for_timetable(staff_number: str) -> pd.DataFrame:
         rows = conn.execute(
             convert_placeholders(
                 """
-            SELECT g.id AS group_id, g.group_name, c.id AS course_id, c.course_code,
-                   c.course_name, g.campus, g.study_mode, g.active
+            SELECT g.id AS group_id, g.group_name, g.lecturer_id,
+                   c.id AS course_id, c.course_code, c.course_name,
+                   l.staff_number, l.full_name AS lecturer_name,
+                   g.campus, g.study_mode, g.active
             FROM student_groups AS g
             JOIN lecturers AS l ON l.id = g.lecturer_id
             JOIN courses AS c ON c.id = g.course_id
@@ -55,10 +58,11 @@ def list_groups_for_timetable(staff_number: str) -> pd.DataFrame:
 
 
 def _group_for_lecturer(staff_number: str, group_id: int) -> dict | None:
-    init_db()
-    with get_connection() as conn:
+    init_runtime_db()
+    with get_runtime_connection() as conn:
         row = conn.execute(
-            """
+            convert_placeholders(
+                """
             SELECT g.id AS group_id, g.group_name, g.lecturer_id, g.course_id,
                    l.id AS lecturer_id, l.staff_number, l.full_name AS lecturer_name,
                    c.course_code, c.course_name
@@ -67,9 +71,49 @@ def _group_for_lecturer(staff_number: str, group_id: int) -> dict | None:
             JOIN courses AS c ON c.id = g.course_id
             WHERE l.staff_number = ? AND g.id = ? AND g.lecturer_id IS NOT NULL
             """,
+            ),
             (_clean(staff_number).replace(" ", ""), int(group_id)),
         ).fetchone()
-    return dict(row) if row else None
+    return row_to_dict(row)
+
+
+def _group_by_id(group_id: int) -> dict | None:
+    init_runtime_db()
+    with get_runtime_connection() as conn:
+        row = conn.execute(
+            convert_placeholders(
+                """
+            SELECT g.id AS group_id, g.group_name, g.lecturer_id,
+                   l.staff_number, l.full_name AS lecturer_name,
+                   c.course_code, c.course_name
+            FROM student_groups AS g
+            LEFT JOIN lecturers AS l ON l.id = g.lecturer_id
+            JOIN courses AS c ON c.id = g.course_id
+            WHERE g.id = ?
+            """
+            ),
+            (int(group_id),),
+        ).fetchone()
+    return row_to_dict(row)
+
+
+def timetable_group_ownership_message(staff_number: str, group_id: int | str | None) -> str | None:
+    cleaned_staff_number = _clean(staff_number).replace(" ", "")
+    if not cleaned_staff_number or group_id in (None, ""):
+        return None
+    try:
+        group_id_int = int(group_id)
+    except (TypeError, ValueError):
+        return None
+    if _group_for_lecturer(cleaned_staff_number, group_id_int) is not None:
+        return None
+    owner = _group_by_id(group_id_int)
+    if owner is None:
+        return "Selected group could not be found."
+    if owner.get("lecturer_id") in (None, ""):
+        return "Selected group is not assigned to a lecturer and cannot be used for timetable entry."
+    owner_label = f"{owner.get('staff_number', '')} - {owner.get('lecturer_name', '')}".strip(" -")
+    return f"Selected group belongs to {owner_label}, not the selected lecturer {cleaned_staff_number}."
 
 
 def list_timetable_entries(
@@ -136,9 +180,10 @@ def _duplicate_exists(cleaned: dict[str, Any], exclude_id: int | None = None) ->
     if exclude_id is not None:
         exclude_sql = "AND id <> ?"
         params.append(int(exclude_id))
-    with get_connection() as conn:
+    with get_runtime_connection() as conn:
         row = conn.execute(
-            f"""
+            convert_placeholders(
+                f"""
             SELECT 1
             FROM timetable_entries
             WHERE lecturer_id = ? AND group_id = ? AND day_of_week = ?
@@ -148,6 +193,7 @@ def _duplicate_exists(cleaned: dict[str, Any], exclude_id: int | None = None) ->
               {exclude_sql}
             LIMIT 1
             """,
+            ),
             tuple(params),
         ).fetchone()
     return row is not None
@@ -176,9 +222,10 @@ def detect_timetable_overlaps(data: dict[str, Any], exclude_id: int | None = Non
     if exclude_id is not None:
         exclude_sql = "AND t.id <> ?"
         params.append(int(exclude_id))
-    with get_connection() as conn:
+    with get_runtime_connection() as conn:
         rows = conn.execute(
-            f"""
+            convert_placeholders(
+                f"""
             SELECT t.id, l.staff_number, l.full_name AS lecturer_name,
                    c.course_code, g.group_name, t.day_of_week,
                    t.start_time, t.end_time, t.effective_start_date, t.effective_end_date,
@@ -197,9 +244,33 @@ def detect_timetable_overlaps(data: dict[str, Any], exclude_id: int | None = Non
               {exclude_sql}
             ORDER BY t.id
             """,
+            ),
             (int(group["lecturer_id"]), *params),
         ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
+    return pd.DataFrame(rows_to_dicts(rows))
+
+
+def backup_before_timetable_write_if_supported(prefix: str) -> dict[str, Any]:
+    provider = database_provider()
+    if provider != "sqlite":
+        return {
+            "performed": False,
+            "mode": provider,
+            "safe_message": "Production PostgreSQL mode: local SQLite backup skipped; provider backup/audit applies.",
+            "path": None,
+        }
+    path = backup_database(prefix=prefix)
+    return {
+        "performed": True,
+        "mode": provider,
+        "safe_message": "Local SQLite backup created before timetable write.",
+        "path": path,
+    }
+
+
+def _commit_if_supported(conn: Any) -> None:
+    if hasattr(conn, "commit"):
+        conn.commit()
 
 
 def validate_timetable_entry(data: dict[str, Any], exclude_id: int | None = None) -> tuple[bool, list[str]]:
@@ -244,16 +315,19 @@ def create_timetable_entry(data: dict[str, Any]) -> dict:
         raise ValueError("; ".join(errors))
     cleaned = _normalise_data(data)
     group = _group_for_lecturer(cleaned["staff_number"], cleaned["group_id"])
-    backup_database(prefix="pt_claims_before_timetable_save")
-    with get_connection() as conn:
+    backup_before_timetable_write_if_supported(prefix="pt_claims_before_timetable_save")
+    with get_runtime_connection() as conn:
         cursor = conn.execute(
-            """
+            convert_placeholders(
+                """
             INSERT INTO timetable_entries (
                 lecturer_id, group_id, day_of_week, start_time, end_time,
                 effective_start_date, effective_end_date, active
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
             """,
+            ),
             (
                 int(group["lecturer_id"]),
                 cleaned["group_id"],
@@ -265,7 +339,9 @@ def create_timetable_entry(data: dict[str, Any]) -> dict:
                 cleaned["active"],
             ),
         )
-        entry_id = cursor.lastrowid
+        entry_row = row_to_dict(cursor.fetchone())
+        entry_id = int(entry_row["id"]) if entry_row else int(getattr(cursor, "lastrowid", 0))
+        _commit_if_supported(conn)
     return get_timetable_entry(entry_id)
 
 
@@ -283,15 +359,17 @@ def update_timetable_entry(entry_id: int, data: dict[str, Any]) -> dict:
         raise ValueError("; ".join(errors))
     cleaned = _normalise_data(data)
     group = _group_for_lecturer(cleaned["staff_number"], cleaned["group_id"])
-    backup_database(prefix="pt_claims_before_timetable_update")
-    with get_connection() as conn:
+    backup_before_timetable_write_if_supported(prefix="pt_claims_before_timetable_update")
+    with get_runtime_connection() as conn:
         conn.execute(
-            """
+            convert_placeholders(
+                """
             UPDATE timetable_entries
             SET lecturer_id = ?, group_id = ?, day_of_week = ?, start_time = ?, end_time = ?,
                 effective_start_date = ?, effective_end_date = ?, active = ?
             WHERE id = ?
             """,
+            ),
             (
                 int(group["lecturer_id"]),
                 cleaned["group_id"],
@@ -304,14 +382,16 @@ def update_timetable_entry(entry_id: int, data: dict[str, Any]) -> dict:
                 int(entry_id),
             ),
         )
+        _commit_if_supported(conn)
     return get_timetable_entry(entry_id)
 
 
 def deactivate_timetable_entry(entry_id: int) -> dict:
     current = get_timetable_entry(entry_id)
-    backup_database(prefix="pt_claims_before_timetable_deactivate")
-    with get_connection() as conn:
-        conn.execute("UPDATE timetable_entries SET active = 0 WHERE id = ?", (int(entry_id),))
+    backup_before_timetable_write_if_supported(prefix="pt_claims_before_timetable_deactivate")
+    with get_runtime_connection() as conn:
+        conn.execute(convert_placeholders("UPDATE timetable_entries SET active = 0 WHERE id = ?"), (int(entry_id),))
+        _commit_if_supported(conn)
     return get_timetable_entry(entry_id)
 
 
@@ -330,14 +410,16 @@ def reactivate_timetable_entry(entry_id: int) -> dict:
     is_valid, errors = validate_timetable_entry(data, exclude_id=int(entry_id))
     if not is_valid:
         raise ValueError("; ".join(errors))
-    backup_database(prefix="pt_claims_before_timetable_reactivate")
-    with get_connection() as conn:
-        conn.execute("UPDATE timetable_entries SET active = 1 WHERE id = ?", (int(entry_id),))
+    backup_before_timetable_write_if_supported(prefix="pt_claims_before_timetable_reactivate")
+    with get_runtime_connection() as conn:
+        conn.execute(convert_placeholders("UPDATE timetable_entries SET active = 1 WHERE id = ?"), (int(entry_id),))
+        _commit_if_supported(conn)
     return get_timetable_entry(entry_id)
 
 
 def delete_timetable_entry(entry_id: int) -> None:
     get_timetable_entry(entry_id)
-    backup_database(prefix="pt_claims_before_timetable_delete")
-    with get_connection() as conn:
-        conn.execute("DELETE FROM timetable_entries WHERE id = ?", (int(entry_id),))
+    backup_before_timetable_write_if_supported(prefix="pt_claims_before_timetable_delete")
+    with get_runtime_connection() as conn:
+        conn.execute(convert_placeholders("DELETE FROM timetable_entries WHERE id = ?"), (int(entry_id),))
+        _commit_if_supported(conn)

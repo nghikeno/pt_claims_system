@@ -1,9 +1,11 @@
 from pathlib import Path
 
 import pytest
+import pandas as pd
 
 from app.config import DB_PATH
 from app.course_group_service import create_course, create_lecturer_group
+from app.database import get_connection
 from app.dev_reset import dev_reset
 from app.lecturer_service import create_lecturer
 from app.timetable_service import (
@@ -16,6 +18,7 @@ from app.timetable_service import (
     list_timetable_entries,
     list_timetable_entries_for_lecturer,
     reactivate_timetable_entry,
+    timetable_group_ownership_message,
     update_timetable_entry,
     validate_timetable_entry,
 )
@@ -109,6 +112,88 @@ def test_group_must_belong_to_selected_lecturer():
 
     assert is_valid is False
     assert "Group must belong to the selected lecturer." in errors
+
+
+def test_lecturer_scoped_group_listed_for_lecturer_passes_ownership_validation():
+    setup_timetable_dependencies()
+    data = valid_entry_data("300001", "ALVINA_GREEN_FT_SEM1_2026")
+
+    is_valid, errors = validate_timetable_entry(data)
+
+    assert is_valid is True
+    assert "Group must belong to the selected lecturer." not in errors
+
+
+def test_group_ownership_validation_allows_string_group_id():
+    setup_timetable_dependencies()
+    data = valid_entry_data("300001", "ALVINA_GREEN_FT_SEM1_2026")
+    data["group_id"] = str(data["group_id"])
+
+    is_valid, errors = validate_timetable_entry(data)
+
+    assert is_valid is True
+    assert errors == []
+
+
+def test_group_ownership_message_identifies_real_owner_for_mismatch():
+    setup_timetable_dependencies()
+    other_group_id = group_id_for("300002", "MERVIN_GREEN_PT_SEM1_2026")
+
+    message = timetable_group_ownership_message("300001", other_group_id)
+
+    assert "Selected group belongs to 300002 - Mervin Lecturer" in message
+    assert "not the selected lecturer 300001" in message
+
+
+def test_generic_group_is_blocked_for_timetable_entry():
+    setup_timetable_dependencies()
+    with get_connection() as conn:
+        course_id = conn.execute("SELECT id FROM courses WHERE course_code = 'ABC123S'").fetchone()["id"]
+        cursor = conn.execute(
+            """
+            INSERT INTO student_groups (group_name, course_id, lecturer_id, campus, study_mode, active)
+            VALUES ('GENERIC_GROUP', ?, NULL, 'Windhoek Main Campus', 'Full-time', 1)
+            """,
+            (course_id,),
+        )
+        generic_group_id = cursor.lastrowid
+
+    is_valid, errors = validate_timetable_entry(valid_entry_data("300001") | {"group_id": generic_group_id})
+
+    assert is_valid is False
+    assert "Group must belong to the selected lecturer." in errors
+    assert "not assigned to a lecturer" in timetable_group_ownership_message("300001", generic_group_id)
+
+
+def test_postgresql_style_group_rows_are_normalised_for_validation(monkeypatch):
+    monkeypatch.setattr(
+        "app.timetable_service._group_for_lecturer",
+        lambda staff_number, group_id: {
+            "group_id": "9",
+            "lecturer_id": "4",
+            "staff_number": str(staff_number),
+            "course_code": "CUS411S",
+            "group_name": "ELIFAS_GREEN_FT_SEM1_2026",
+        },
+    )
+    monkeypatch.setattr("app.timetable_service._duplicate_exists", lambda cleaned, exclude_id=None: False)
+    monkeypatch.setattr("app.timetable_service.detect_timetable_overlaps", lambda data, exclude_id=None: pd.DataFrame())
+
+    is_valid, errors = validate_timetable_entry(
+        {
+            "staff_number": "1009568",
+            "group_id": "9",
+            "day_of_week": "Monday",
+            "start_time": "08:00",
+            "end_time": "09:00",
+            "effective_start_date": "2026-02-01",
+            "effective_end_date": "2026-06-30",
+            "active": True,
+        }
+    )
+
+    assert is_valid is True
+    assert errors == []
 
 
 def test_start_time_must_be_before_end_time():
