@@ -18,7 +18,7 @@ from app.auth_service import (
     count_admin_accounts,
     lecturer_scoped_staff_number,
 )
-from app.account_admin_service import list_user_accounts, reset_user_password
+from app.account_admin_service import PasswordResetError, list_user_accounts, reset_user_password
 from app.academic_calendar_service import (
     CALENDAR_TYPES,
     SCOPE_TYPES,
@@ -2736,6 +2736,8 @@ def page_account_management() -> None:
         try:
             result = reset_user_password(current_user(), labels[selected_label], temp_password, confirm_password)
             st.success(f"Password reset for {result['username']}. Must change password at next login.")
+        except PasswordResetError as exc:
+            st.error(f"Password reset failed during {exc.component}.")
         except Exception as exc:
             show_error("Password reset failed.", exc)
 
