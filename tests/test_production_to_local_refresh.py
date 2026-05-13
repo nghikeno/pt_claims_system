@@ -11,7 +11,9 @@ from app.production_to_local_refresh import (
     build_report,
     main,
     replace_supported_tables,
+    render_text_report,
     run_refresh,
+    validate_output_path,
     validate_local_path,
 )
 from tests.test_local_first_sync import SECRET_URL, make_db
@@ -190,8 +192,32 @@ def test_replace_local_creates_timestamped_backup(tmp_path, monkeypatch):
 
     assert result["backup_path"]
     assert "BEFORE_PRODUCTION_REFRESH" in result["backup_path"]
+    assert result["blockers"] == []
+    assert result["local_db_replaced"] is True
+    text = render_text_report(result)
+    assert "Local backup created:" in text
+    assert "Local DB replaced successfully." in text
+    assert "Output path cannot be the active local DB unless --replace-local is used." not in text
     with sqlite3.connect(local) as conn:
         assert conn.execute("SELECT full_name FROM lecturers").fetchone()[0] == "Production Current"
+
+
+def test_output_equal_active_local_without_replace_local_blocks(tmp_path):
+    local = tmp_path / "local.db"
+    make_db(local)
+
+    blockers = validate_output_path(local, local, replace_local=False)
+
+    assert "Output path cannot be the active local DB unless --replace-local is used." in blockers
+
+
+def test_output_equal_active_local_with_replace_local_does_not_block(tmp_path):
+    local = tmp_path / "local.db"
+    make_db(local)
+
+    blockers = validate_output_path(local, local, replace_local=True)
+
+    assert "Output path cannot be the active local DB unless --replace-local is used." not in blockers
 
 
 def test_sqlite_fk_order_refreshes_child_tables(tmp_path):

@@ -98,13 +98,14 @@ def build_report(
     output_path: str | Path | None = None,
     allow_training_local: bool = False,
     production_rows: dict[str, list[dict[str, Any]]] | None = None,
+    replace_local: bool = False,
 ) -> dict[str, Any]:
     local = Path(local_path)
     output = Path(output_path) if output_path else None
     blockers = []
     blockers.extend(require_production_read_available())
     blockers.extend(validate_local_path(local, allow_training_local=allow_training_local))
-    blockers.extend(validate_output_path(output, local))
+    blockers.extend(validate_output_path(output, local, replace_local=replace_local))
     local_counts = {}
     production_counts = {}
     if local.exists():
@@ -127,6 +128,8 @@ def build_report(
         "local_counts": local_counts,
         "production_counts": production_counts,
         "rows_replaced": rows_replaced,
+        "replace_local": replace_local,
+        "local_db_replaced": False,
         "warnings": [
             "Production is read-only for this command.",
             "Local user_accounts, password hashes/salts, and audit_logs are preserved.",
@@ -229,9 +232,16 @@ def run_refresh(args: argparse.Namespace) -> dict[str, Any]:
         result["output_path"] = str(local_path)
     else:
         result = build_refreshed_copy(local_path, output_path, production_rows)
-    report = build_report(local_path, result["output_path"], allow_training_local=args.allow_training_local, production_rows=production_rows)
+    report = build_report(
+        local_path,
+        result["output_path"],
+        allow_training_local=args.allow_training_local,
+        production_rows=production_rows,
+        replace_local=args.replace_local,
+    )
     report["refresh_result"] = result
     report["backup_path"] = str(backup_path) if backup_path else None
+    report["local_db_replaced"] = bool(args.replace_local)
     return report
 
 
@@ -255,6 +265,8 @@ def render_text_report(report: dict[str, Any]) -> str:
     if report.get("backup_path"):
         lines.append("")
         lines.append(f"Local backup created: {report['backup_path']}")
+    if report.get("local_db_replaced"):
+        lines.append("Local DB replaced successfully.")
     if report.get("blockers"):
         lines.append("")
         lines.append("Blockers:")
