@@ -39,6 +39,7 @@ from app.config import (
     generated_file_mode_warning,
     get_app_env,
     is_production,
+    is_training,
     session_timeout_minutes,
 )
 from app.claim_period_service import resolve_claim_period
@@ -157,7 +158,7 @@ from app_ui.ui_helpers import (
     timetable_time_options,
     v2_output_folder_for,
 )
-from app_ui.theme import apply_app_theme, render_app_header, render_login_header, render_sidebar_user, render_status_badge
+from app_ui.theme import apply_app_theme, render_app_header, render_login_header, render_sidebar_user, render_status_badge, render_training_banner
 from app_ui.session_security import (
     clear_sensitive_session_state,
     effective_user,
@@ -2785,6 +2786,8 @@ def render_view_as_controls(user: dict) -> None:
 def main() -> None:
     init_runtime_db()
     apply_app_theme()
+    if is_training():
+        render_training_banner()
     if enable_debug_stack_traces():
         st.sidebar.checkbox("Show debug stack traces", key="debug_errors")
     else:

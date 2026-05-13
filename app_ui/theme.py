@@ -396,6 +396,26 @@ def render_login_header() -> None:
     )
 
 
+def render_training_banner() -> None:
+    st = _st()
+    st.markdown(
+        """
+        <div style="
+            border: 1px solid #b45309;
+            background: #fffbeb;
+            color: #78350f;
+            border-radius: 10px;
+            padding: 0.75rem 1rem;
+            margin: 0.5rem 0 1rem 0;
+            font-weight: 700;
+        ">
+            TRAINING ENVIRONMENT, dummy data only.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_sidebar_user(username: str, role: str, display_name: str | None = None) -> None:
     st = _st()
     label = display_name or username

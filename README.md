@@ -786,6 +786,15 @@ Phase 14.5.3 PostgreSQL runtime and access-control notes:
 - Claim completeness checks compare distinct `course_code` plus `group_name` pairs so duplicate group names under different courses are audited correctly before rendering.
 - Streamlit Cloud platform controls such as Manage app, Logs, Reboot app, Delete app, and Settings are outside the application RBAC; use Streamlit workspace/sharing permissions and an incognito/private viewer check to confirm what lecturers see.
 
+Phase 14.6 separate training environment notes:
+
+- `APP_ENV=training` is a first-class environment and displays a visible `TRAINING ENVIRONMENT, dummy data only.` banner.
+- Training data must use a separate database and separate object-storage prefix or bucket; do not add dummy lecturers or dummy students to production.
+- Create the local dummy-only training database with `python -m app.create_training_database --dry-run` and then `python -m app.create_training_database --overwrite --include-admin` after setting password environment variables.
+- Migrate training data only with `TRAINING_DATABASE_URL` and the guarded command `python -m app.migrate_training_database --yes --confirm-training-migration I_UNDERSTAND_THIS_IS_TRAINING_DATA_ONLY`.
+- `OBJECT_STORAGE_PREFIX=training-v2` keeps generated training documents separate from production object-storage keys.
+- See `docs/training_environment.md` for the full training setup. Do not commit or print training or production secrets.
+
 Phase 2.1 privacy notes:
 
 - Session Generation UI hides sensitive lecturer fields such as ID/passport, PAYE, address, contact number, and highest qualification.

@@ -141,6 +141,11 @@ def test_readme_contains_phase_4_3_wording():
     assert "Phase 14.5.3 PostgreSQL runtime and access-control notes" in readme
     assert "distinct `course_code` plus `group_name` pairs" in readme
     assert "Streamlit Cloud platform controls" in readme
+    assert "Phase 14.6 separate training environment notes" in readme
+    assert "APP_ENV=training" in readme
+    assert "python -m app.create_training_database --dry-run" in readme
+    assert "python -m app.migrate_training_database --yes --confirm-training-migration" in readme
+    assert "docs/training_environment.md" in readme
     assert "future lecturer login access" in readme
     assert "Authentication is not implemented yet" in readme
     assert "Phase 4.2 adds browser-based Course and Group Entry" in readme

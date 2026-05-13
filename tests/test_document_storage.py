@@ -77,6 +77,32 @@ def test_object_storage_configured_fake_upload_returns_safe_reference(tmp_path):
     assert "example-secret" not in str(stored.as_dict())
 
 
+def test_training_object_storage_prefix_separates_from_production(tmp_path):
+    file_path = tmp_path / "training-claim.docx"
+    file_path.write_text("demo", encoding="utf-8")
+    base_env = {
+        "DOCUMENT_STORAGE_MODE": "object_storage",
+        "OBJECT_STORAGE_PROVIDER": "r2",
+        "OBJECT_STORAGE_BUCKET": "demo-bucket",
+        "OBJECT_STORAGE_REGION": "auto",
+        "OBJECT_STORAGE_ENDPOINT_URL": "https://storage.example.invalid",
+        "OBJECT_STORAGE_ACCESS_KEY_ID": "example-access",
+        "OBJECT_STORAGE_SECRET_ACCESS_KEY": "example-secret",
+        "OBJECT_STORAGE_FAKE_UPLOAD": "true",
+    }
+
+    production = get_document_storage(env=base_env | {"OBJECT_STORAGE_PREFIX": "production-v2"}).save_generated_file(
+        file_path, "generated_v2/claim.docx"
+    )
+    training = get_document_storage(env=base_env | {"APP_ENV": "training", "OBJECT_STORAGE_PREFIX": "training-v2"}).save_generated_file(
+        file_path, "generated_v2/claim.docx"
+    )
+
+    assert production.storage_key == "production-v2/generated_v2/claim.docx"
+    assert training.storage_key == "training-v2/generated_v2/claim.docx"
+    assert production.storage_key != training.storage_key
+
+
 def test_object_storage_fake_signed_download_url_does_not_expose_secrets():
     env = {
         "DOCUMENT_STORAGE_MODE": "object_storage",

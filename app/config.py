@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any
 
 
-VALID_APP_ENVS = {"development", "staging", "production"}
+VALID_APP_ENVS = {"development", "staging", "training", "production"}
 VALID_GENERATED_FILE_MODES = {"local", "ephemeral", "object_storage_pending", "object_storage"}
 
 
@@ -34,6 +34,10 @@ def is_production() -> bool:
 
 def is_development() -> bool:
     return get_app_env() == "development"
+
+
+def is_training() -> bool:
+    return get_app_env() == "training"
 
 
 def _bool_setting(name: str, default: bool) -> bool:
