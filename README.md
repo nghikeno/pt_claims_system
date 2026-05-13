@@ -818,6 +818,19 @@ Phase 14.9 local-first data entry and guarded production sync notes:
 - The sync report does not print database URLs, passwords, tokens, password hashes, or sensitive lecturer fields.
 - See `docs/local_first_sync.md` for the full workflow and conflict review guidance.
 
+Phase 14.10 production-to-local refresh notes:
+
+- If records are added directly in production, local SQLite can become stale and should be refreshed before continuing local-first data entry.
+- `python -m app.production_to_local_refresh` reads production PostgreSQL and writes only to local SQLite files.
+- Supported refresh tables are `lecturers`, `courses`, `student_groups`, `timetable_entries`, `students`, `group_enrolments`, and `academic_calendar`.
+- Excluded data includes `user_accounts`, password hashes/salts, `audit_logs`, generated documents, generated metadata, R2/object-storage objects, local backups, and secrets.
+- The preferred workflow creates a refreshed local copy first:
+  `python -m app.production_to_local_refresh --yes --output data/pt_claims_FROM_PRODUCTION_REFRESHED.db --confirm-refresh I_UNDERSTAND_THIS_WILL_COPY_PRODUCTION_OPERATIONAL_DATA_TO_LOCAL`
+- Replacing `data/pt_claims.db` requires review plus `--replace-local`, `--backup-local`, and the exact replace confirmation phrase:
+  `python -m app.production_to_local_refresh --yes --replace-local --backup-local --confirm-refresh I_UNDERSTAND_THIS_WILL_REPLACE_LOCAL_OPERATIONAL_DATA_WITH_PRODUCTION`
+- The command never writes to production and never prints `DATABASE_URL`, passwords, tokens, hashes, or object-storage secrets.
+- See `docs/production_to_local_refresh.md` for the full refresh workflow and PowerShell cleanup command.
+
 Phase 2.1 privacy notes:
 
 - Session Generation UI hides sensitive lecturer fields such as ID/passport, PAYE, address, contact number, and highest qualification.

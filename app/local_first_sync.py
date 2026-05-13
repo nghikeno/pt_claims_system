@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from app.config import DB_PATH, database_provider, database_url
-from app.db_provider import convert_placeholders, get_runtime_connection, row_to_dict, rows_to_dicts
+from app.db_provider import close_postgres_pool, convert_placeholders, get_runtime_connection, row_to_dict, rows_to_dicts
 
 
 SUPPORTED_TABLES = [
@@ -686,6 +686,8 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"Local-first sync failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
+    finally:
+        close_postgres_pool()
 
 
 if __name__ == "__main__":
