@@ -804,6 +804,20 @@ Phase 14.8 safe lecturer staff-number correction notes:
 - Historical audit rows, old local generated files, and old object-storage keys are not renamed. Regenerate official documents if previously generated files contain or are stored under the old staff number.
 - Do not use this workflow to replace one lecturer with another person.
 
+Phase 14.9 local-first data entry and guarded production sync notes:
+
+- Git push deploys code only; it does not sync local SQLite records to Neon PostgreSQL.
+- `python -m app.local_first_sync` adds a guarded local-to-production sync workflow for operational data entry.
+- Supported Phase 14.9 tables are `lecturers`, `courses`, `student_groups`, `timetable_entries`, `students`, `group_enrolments`, and `academic_calendar`.
+- Excluded data includes `user_accounts`, password hashes/salts, `audit_logs`, generated documents, generated file metadata, object-storage objects, local backups, and secrets.
+- Sync matching uses natural keys such as staff number, course code, student number, lecturer/course/group combinations, and timetable identity fields.
+- Phase 14.9 does not support destructive deletes, full production overwrite, or staff-number correction.
+- Dry-run is the required review step: `python -m app.local_first_sync --dry-run`.
+- Write mode requires PostgreSQL `DATABASE_URL`, provider-level backup acknowledgement, `--yes`, and the exact confirmation phrase:
+  `python -m app.local_first_sync --yes --backup-acknowledged --confirm-sync I_UNDERSTAND_THIS_WILL_WRITE_LOCAL_CHANGES_TO_PRODUCTION`
+- The sync report does not print database URLs, passwords, tokens, password hashes, or sensitive lecturer fields.
+- See `docs/local_first_sync.md` for the full workflow and conflict review guidance.
+
 Phase 2.1 privacy notes:
 
 - Session Generation UI hides sensitive lecturer fields such as ID/passport, PAYE, address, contact number, and highest qualification.
