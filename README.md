@@ -795,6 +795,15 @@ Phase 14.6 separate training environment notes:
 - `OBJECT_STORAGE_PREFIX=training-v2` keeps generated training documents separate from production object-storage keys.
 - See `docs/training_environment.md` for the full training setup. Do not commit or print training or production secrets.
 
+Phase 14.8 safe lecturer staff-number correction notes:
+
+- Staff number remains locked in the normal Lecturer Entry update form because it is the lecturer login username and an operational identifier.
+- Admins can use the separate `Correct staff number` panel only for genuine staff-number data-entry mistakes for the same lecturer.
+- The correction requires the exact confirmation phrase `CORRECT STAFF NUMBER`, validates duplicates, updates `lecturers.staff_number`, and updates the linked lecturer account username while preserving role, lecturer link, password hash/salt, active state, first-login flag, created date, and last login.
+- The lecturer must use the corrected staff number as the username after correction; the password is not changed.
+- Historical audit rows, old local generated files, and old object-storage keys are not renamed. Regenerate official documents if previously generated files contain or are stored under the old staff number.
+- Do not use this workflow to replace one lecturer with another person.
+
 Phase 2.1 privacy notes:
 
 - Session Generation UI hides sensitive lecturer fields such as ID/passport, PAYE, address, contact number, and highest qualification.

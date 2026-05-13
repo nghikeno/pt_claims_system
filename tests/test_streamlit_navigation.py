@@ -134,6 +134,17 @@ def test_account_management_reset_does_not_use_old_generic_failure_message():
     assert "reset_user_password" in account_page
 
 
+def test_lecturer_staff_number_correction_is_separate_admin_panel():
+    source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
+    lecturer_entry = source.split("def page_lecturer_entry", 1)[1].split("def _course_form_fields", 1)[0]
+
+    assert "Staff number cannot be changed in update mode" in lecturer_entry
+    assert "Correct staff number" in source
+    assert "CONFIRMATION_PHRASE" in source
+    assert "correct_lecturer_staff_number" in source
+    assert "Do not use it to replace one lecturer with another person." in source
+
+
 def test_view_as_lecturer_lookup_is_provider_aware():
     source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
     helper = source.split("def _lecturer_view_user_from_identifier", 1)[1].split("def _lecturer_view_user_from_staff_number", 1)[0]

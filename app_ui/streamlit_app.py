@@ -90,6 +90,7 @@ from app.lecturer_service import (
     update_lecturer,
     validate_lecturer_data,
 )
+from app.lecturer_staff_number_service import CONFIRMATION_PHRASE, correct_lecturer_staff_number
 from app.master_data_template import generate_master_data_template
 from app.performance_queries import lecturer_dashboard_counts
 from app.preclaim_verification_service import (
@@ -950,6 +951,44 @@ def _display_validation_errors(errors: list[str]) -> None:
         st.error(error)
 
 
+def _render_staff_number_correction_panel(existing: dict) -> None:
+    staff_number = str(existing.get("staff_number") or "")
+    lecturer_id = int(existing.get("id"))
+    st.divider()
+    st.subheader("Correct staff number")
+    st.warning(
+        "Use this only to correct a staff-number data-entry error for the same lecturer. "
+        "Do not use it to replace one lecturer with another person."
+    )
+    st.caption(
+        "The linked lecturer login username is updated when a matching lecturer account exists. "
+        "Previously generated files are not renamed; regenerate official documents if the old staff number appears in them."
+    )
+    with st.form(f"correct_staff_number_form_{lecturer_id}"):
+        st.text_input("Current staff number", value=staff_number, disabled=True, key=f"correct_current_staff_{lecturer_id}")
+        new_staff_number = st.text_input("New staff number", key=f"correct_new_staff_{lecturer_id}").strip().replace(" ", "")
+        confirmation = st.text_input(
+            f'Type "{CONFIRMATION_PHRASE}" to confirm',
+            key=f"correct_staff_confirmation_{lecturer_id}",
+        )
+        submitted = st.form_submit_button("Correct staff number")
+    if submitted:
+        result = correct_lecturer_staff_number(
+            current_user(),
+            lecturer_id,
+            staff_number,
+            new_staff_number,
+            confirmation,
+        )
+        if result.get("success"):
+            st.success(result.get("safe_message"))
+            for warning in result.get("warnings") or []:
+                st.warning(warning)
+            st.info("Refresh or reselect the lecturer to continue editing with the corrected staff number.")
+        else:
+            st.error(result.get("safe_message"))
+
+
 def page_lecturer_entry() -> None:
     render_app_header("Lecturer Entry", "Capture and maintain lecturer claim details.", badge="Admin")
     st.info("Use this form to add or update lecturer details directly. Do not enter bank details.")
@@ -1017,6 +1056,7 @@ def page_lecturer_entry() -> None:
                         _show_lecturer_confirmation(record)
                     except Exception as exc:
                         show_error(str(exc), exc)
+                _render_staff_number_correction_panel(existing)
 
     with existing_tab:
         lecturers_df_all = list_lecturers()
