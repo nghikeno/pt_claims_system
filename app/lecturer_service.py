@@ -7,10 +7,11 @@ from typing import Any
 
 import pandas as pd
 
+from app.audit_service import log_audit_event
 from app.backup_database import backup_database
 from app.config import EXPORTS_DIR
 from app.data_validation import parse_bool, parse_date_value, parse_positive_float
-from app.db_provider import convert_placeholders, get_runtime_connection, row_to_dict, rows_to_dicts
+from app.db_provider import convert_placeholders, get_runtime_connection, init_runtime_db, row_to_dict, rows_to_dicts
 from app.database import get_connection, init_db
 from app.config import database_provider
 
@@ -117,6 +118,54 @@ def _ensure_sqlite_schema() -> None:
         init_db()
 
 
+def backup_before_write_if_supported(prefix: str = "pt_claims_before_lecturer_save") -> dict[str, Any]:
+    provider = database_provider()
+    if provider != "sqlite":
+        return {
+            "performed": False,
+            "mode": provider,
+            "safe_message": "Production PostgreSQL mode: local SQLite backup skipped; provider backup/audit applies.",
+            "path": None,
+        }
+    path = backup_database(prefix=prefix)
+    return {
+        "performed": True,
+        "mode": provider,
+        "safe_message": "Local SQLite backup created before lecturer write.",
+        "path": path,
+    }
+
+
+def _rowcount_ok(cursor: Any) -> bool:
+    rowcount = getattr(cursor, "rowcount", None)
+    return rowcount in (None, -1, 1)
+
+
+def _commit_if_supported(conn: Any) -> None:
+    if hasattr(conn, "commit"):
+        conn.commit()
+
+
+def _attach_backup_result(record: dict | None, backup_result: dict[str, Any]) -> dict:
+    output = dict(record or {})
+    output["_backup_result"] = backup_result
+    return output
+
+
+def _audit_lecturer_write(action: str, staff_number: str, success: bool = True) -> None:
+    try:
+        log_audit_event(
+            action,
+            user=None,
+            entity_type="lecturer",
+            entity_id=staff_number,
+            details={"staff_number": staff_number},
+            success=success,
+        )
+    except Exception:
+        return
+
+
 def list_lecturers() -> pd.DataFrame:
     _ensure_sqlite_schema()
     with get_runtime_connection() as conn:
@@ -182,11 +231,12 @@ def create_lecturer(data: dict[str, Any]) -> dict:
     cleaned = _normalise_data(data)
     if lecturer_exists(cleaned["staff_number"]):
         raise ValueError("Lecturer with this staff number already exists. Use Update Existing Lecturer.")
-    init_db()
-    backup_database(prefix="pt_claims_before_lecturer_save")
-    with get_connection() as conn:
+    init_runtime_db()
+    backup_result = backup_before_write_if_supported(prefix="pt_claims_before_lecturer_save")
+    with get_runtime_connection() as conn:
         conn.execute(
-            """
+            convert_placeholders(
+                """
             INSERT INTO lecturers (
                 staff_number, title, full_name, highest_qualification,
                 id_or_passport_number, paye_number, physical_address, contact_number,
@@ -194,9 +244,12 @@ def create_lecturer(data: dict[str, Any]) -> dict:
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
+            ),
             tuple(cleaned[column] for column in LECTURER_COLUMNS),
         )
-    return get_lecturer_by_staff_number(cleaned["staff_number"])
+        _commit_if_supported(conn)
+    _audit_lecturer_write("lecturer_create", cleaned["staff_number"])
+    return _attach_backup_result(get_lecturer_by_staff_number(cleaned["staff_number"]), backup_result)
 
 
 def update_lecturer(staff_number: str, data: dict[str, Any]) -> dict:
@@ -208,10 +261,12 @@ def update_lecturer(staff_number: str, data: dict[str, Any]) -> dict:
     if not is_valid:
         raise ValueError("; ".join(errors))
     cleaned = _normalise_data(data_for_validation)
-    backup_database(prefix="pt_claims_before_lecturer_save")
-    with get_connection() as conn:
-        conn.execute(
-            """
+    init_runtime_db()
+    backup_result = backup_before_write_if_supported(prefix="pt_claims_before_lecturer_save")
+    with get_runtime_connection() as conn:
+        cursor = conn.execute(
+            convert_placeholders(
+                """
             UPDATE lecturers
             SET title = ?, full_name = ?, highest_qualification = ?,
                 id_or_passport_number = ?, paye_number = ?, physical_address = ?,
@@ -219,6 +274,7 @@ def update_lecturer(staff_number: str, data: dict[str, Any]) -> dict:
                 contract_start_date = ?, contract_end_date = ?, active = ?
             WHERE staff_number = ?
             """,
+            ),
             (
                 cleaned["title"],
                 cleaned["full_name"],
@@ -235,7 +291,11 @@ def update_lecturer(staff_number: str, data: dict[str, Any]) -> dict:
                 target_staff_number,
             ),
         )
-    return get_lecturer_by_staff_number(target_staff_number)
+        if not _rowcount_ok(cursor):
+            raise ValueError("Lecturer update failed: selected lecturer was not updated.")
+        _commit_if_supported(conn)
+    _audit_lecturer_write("lecturer_update", target_staff_number)
+    return _attach_backup_result(get_lecturer_by_staff_number(target_staff_number), backup_result)
 
 
 def export_lecturers_to_csv(output_path: str | Path | None = None) -> str:

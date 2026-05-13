@@ -925,6 +925,13 @@ def _lecturer_form_fields(
 
 
 def _show_lecturer_confirmation(record: dict) -> None:
+    backup_result = record.get("_backup_result") if isinstance(record, dict) else None
+    if backup_result:
+        message = str(backup_result.get("safe_message") or "")
+        if backup_result.get("performed") and backup_result.get("path"):
+            st.info(f"{message} Saved backup: {backup_result.get('path')}")
+        elif message:
+            st.info(message)
     st.write("Saved lecturer summary:")
     st.dataframe(
         pd.DataFrame(
