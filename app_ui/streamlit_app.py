@@ -951,9 +951,22 @@ def _display_validation_errors(errors: list[str]) -> None:
         st.error(error)
 
 
-def _render_staff_number_correction_panel(existing: dict) -> None:
+def _lecturer_update_identity(existing: dict) -> str:
+    return f"{int(existing.get('id'))}_{str(existing.get('staff_number') or '').strip()}"
+
+
+def _lecturer_selection_matches_record(selected_staff_number: str, existing: dict) -> bool:
+    return str(selected_staff_number).strip() == str(existing.get("staff_number") or "").strip()
+
+
+def _render_selected_lecturer_summary(existing: dict) -> None:
+    st.info(f"Selected record: {existing.get('staff_number', '')} - {existing.get('full_name', '')}")
+
+
+def _render_staff_number_correction_panel(existing: dict, selected_staff_number: str) -> None:
     staff_number = str(existing.get("staff_number") or "")
     lecturer_id = int(existing.get("id"))
+    identity = _lecturer_update_identity(existing)
     st.divider()
     st.subheader("Correct staff number")
     st.warning(
@@ -964,15 +977,21 @@ def _render_staff_number_correction_panel(existing: dict) -> None:
         "The linked lecturer login username is updated when a matching lecturer account exists. "
         "Previously generated files are not renamed; regenerate official documents if the old staff number appears in them."
     )
-    with st.form(f"correct_staff_number_form_{lecturer_id}"):
-        st.text_input("Current staff number", value=staff_number, disabled=True, key=f"correct_current_staff_{lecturer_id}")
-        new_staff_number = st.text_input("New staff number", key=f"correct_new_staff_{lecturer_id}").strip().replace(" ", "")
+    mismatch = not _lecturer_selection_matches_record(selected_staff_number, existing)
+    if mismatch:
+        st.error("Selected lecturer and loaded form record do not match. Please reselect the lecturer.")
+    with st.form(f"correct_staff_number_form_{identity}"):
+        st.text_input("Current staff number", value=staff_number, disabled=True, key=f"correct_current_staff_{identity}")
+        new_staff_number = st.text_input("New staff number", key=f"correct_new_staff_{identity}").strip().replace(" ", "")
         confirmation = st.text_input(
             f'Type "{CONFIRMATION_PHRASE}" to confirm',
-            key=f"correct_staff_confirmation_{lecturer_id}",
+            key=f"correct_staff_confirmation_{identity}",
         )
-        submitted = st.form_submit_button("Correct staff number")
+        submitted = st.form_submit_button("Correct staff number", disabled=mismatch)
     if submitted:
+        if mismatch:
+            st.error("Selected lecturer and loaded form record do not match. Please reselect the lecturer.")
+            return
         result = correct_lecturer_staff_number(
             current_user(),
             lecturer_id,
@@ -1045,18 +1064,26 @@ def page_lecturer_entry() -> None:
                 if not existing:
                     st.error("Selected lecturer could not be loaded.")
                     return
+                mismatch = not _lecturer_selection_matches_record(staff_number, existing)
+                _render_selected_lecturer_summary(existing)
+                if mismatch:
+                    st.error("Selected lecturer and loaded form record do not match. Please reselect the lecturer.")
                 st.info("Staff number cannot be changed in update mode. Use the Active checkbox to deactivate or reactivate lecturers.")
-                with st.form("update_lecturer_form"):
-                    data = _lecturer_form_fields("update", existing, staff_number_disabled=True)
-                    submitted = st.form_submit_button("Update lecturer")
+                update_identity = _lecturer_update_identity(existing)
+                with st.form(f"update_lecturer_form_{update_identity}"):
+                    data = _lecturer_form_fields(f"update_{update_identity}", existing, staff_number_disabled=True)
+                    submitted = st.form_submit_button("Update lecturer", disabled=mismatch)
                 if submitted:
+                    if mismatch or str(data.get("staff_number") or "").strip() != str(existing.get("staff_number") or "").strip():
+                        st.error("Selected lecturer and loaded form record do not match. Please reselect the lecturer.")
+                        return
                     try:
                         record = update_lecturer(staff_number, data)
                         st.success("Lecturer saved successfully.")
                         _show_lecturer_confirmation(record)
                     except Exception as exc:
                         show_error(str(exc), exc)
-                _render_staff_number_correction_panel(existing)
+                _render_staff_number_correction_panel(existing, staff_number)
 
     with existing_tab:
         lecturers_df_all = list_lecturers()

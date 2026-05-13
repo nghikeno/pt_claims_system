@@ -145,6 +145,29 @@ def test_lecturer_staff_number_correction_is_separate_admin_panel():
     assert "Do not use it to replace one lecturer with another person." in source
 
 
+def test_lecturer_update_form_keys_are_scoped_to_selected_record():
+    source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
+    lecturer_entry = source.split("def page_lecturer_entry", 1)[1].split("def _course_form_fields", 1)[0]
+
+    assert "def _lecturer_update_identity" in source
+    assert "Selected record:" in source
+    assert 'with st.form(f"update_lecturer_form_{update_identity}")' in lecturer_entry
+    assert '_lecturer_form_fields(f"update_{update_identity}", existing, staff_number_disabled=True)' in lecturer_entry
+    assert 'key=f"correct_new_staff_{identity}"' in source
+    assert 'key=f"correct_staff_confirmation_{identity}"' in source
+
+
+def test_lecturer_update_mismatch_blocks_save_and_correction():
+    source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
+    lecturer_entry = source.split("def page_lecturer_entry", 1)[1].split("def _course_form_fields", 1)[0]
+    correction_panel = source.split("def _render_staff_number_correction_panel", 1)[1].split("def page_lecturer_entry", 1)[0]
+
+    assert "Selected lecturer and loaded form record do not match. Please reselect the lecturer." in source
+    assert "submitted = st.form_submit_button(\"Update lecturer\", disabled=mismatch)" in lecturer_entry
+    assert "submitted = st.form_submit_button(\"Correct staff number\", disabled=mismatch)" in correction_panel
+    assert 'str(data.get("staff_number") or "").strip() != str(existing.get("staff_number") or "").strip()' in lecturer_entry
+
+
 def test_view_as_lecturer_lookup_is_provider_aware():
     source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
     helper = source.split("def _lecturer_view_user_from_identifier", 1)[1].split("def _lecturer_view_user_from_staff_number", 1)[0]
