@@ -6,13 +6,15 @@ import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from app.config import DB_PATH, database_provider, database_url
 from app.postgres_schema import POSTGRES_SCHEMA_SQL
 
 
 _POSTGRES_POOL = None
+POSTGRES_TRANSIENT_RETRY_ATTEMPTS = 2
+POSTGRES_TRANSIENT_RETRY_BACKOFF_SECONDS = 0.25
 
 
 def current_database_summary() -> dict[str, str]:
@@ -106,14 +108,91 @@ def rows_to_dicts(rows: list[Any]) -> list[dict]:
 def get_runtime_connection(db_path: str | Path = DB_PATH):
     if database_provider() == "postgresql":
         require_postgresql_dependency()
-        pool = get_postgres_pool()
-        if pool is not None:
-            return pool.connection()
-        return connect_postgres_direct()
+        return PostgresRuntimeConnection()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def is_transient_postgres_error(exc: BaseException) -> bool:
+    if database_provider() != "postgresql":
+        return False
+    try:
+        import psycopg
+        from psycopg import errors
+    except Exception:
+        return False
+    transient_types = [psycopg.OperationalError, psycopg.InterfaceError]
+    admin_shutdown = getattr(errors, "AdminShutdown", None)
+    if admin_shutdown is not None:
+        transient_types.append(admin_shutdown)
+    return isinstance(exc, tuple(transient_types))
+
+
+def _log_postgres_reconnect(label: str, attempt: int, exc: BaseException) -> None:
+    print(f"POSTGRES_RECOVERY label={label} attempt={attempt} error={type(exc).__name__}; reconnecting")
+
+
+def run_with_postgres_reconnect(
+    label: str,
+    operation: Callable[[], Any],
+    attempts: int = POSTGRES_TRANSIENT_RETRY_ATTEMPTS,
+    backoff_seconds: float = POSTGRES_TRANSIENT_RETRY_BACKOFF_SECONDS,
+) -> Any:
+    last_exc: BaseException | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return operation()
+        except Exception as exc:
+            if database_provider() != "postgresql" or not is_transient_postgres_error(exc) or attempt >= attempts:
+                raise
+            last_exc = exc
+            _log_postgres_reconnect(label, attempt, exc)
+            close_postgres_pool()
+            time.sleep(backoff_seconds)
+    if last_exc is not None:
+        raise last_exc
+    return operation()
+
+
+class PostgresRuntimeConnection:
+    def __init__(self) -> None:
+        self._manager = None
+        self._conn = None
+
+    def __enter__(self):
+        last_exc: BaseException | None = None
+        for attempt in range(1, POSTGRES_TRANSIENT_RETRY_ATTEMPTS + 1):
+            try:
+                pool = get_postgres_pool()
+                self._manager = pool.connection() if pool is not None else connect_postgres_direct()
+                self._conn = self._manager.__enter__()
+                self._conn.execute("SELECT 1")
+                return self._conn
+            except Exception as exc:
+                last_exc = exc
+                self._safe_exit()
+                if not is_transient_postgres_error(exc) or attempt >= POSTGRES_TRANSIENT_RETRY_ATTEMPTS:
+                    raise
+                _log_postgres_reconnect("connection_health_check", attempt, exc)
+                close_postgres_pool()
+                time.sleep(POSTGRES_TRANSIENT_RETRY_BACKOFF_SECONDS)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Unable to open PostgreSQL runtime connection.")
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._safe_exit(exc_type, exc, tb)
+
+    def _safe_exit(self, exc_type=None, exc=None, tb=None):
+        if self._manager is None:
+            return False
+        try:
+            return self._manager.__exit__(exc_type, exc, tb)
+        finally:
+            self._manager = None
+            self._conn = None
 
 
 def connect_postgres_direct():
@@ -155,11 +234,14 @@ def close_postgres_pool() -> None:
 def init_runtime_db() -> None:
     if database_provider() == "postgresql":
         require_postgresql_dependency()
-        with get_runtime_connection() as conn:
-            with conn.cursor() as cur:
-                for statement in [part.strip() for part in POSTGRES_SCHEMA_SQL.split(";") if part.strip()]:
-                    cur.execute(statement)
-            conn.commit()
+        def _run_postgres_init() -> None:
+            with get_runtime_connection() as conn:
+                with conn.cursor() as cur:
+                    for statement in [part.strip() for part in POSTGRES_SCHEMA_SQL.split(";") if part.strip()]:
+                        cur.execute(statement)
+                conn.commit()
+
+        run_with_postgres_reconnect("init_runtime_db", _run_postgres_init)
         return
     from app.database import init_db
 
