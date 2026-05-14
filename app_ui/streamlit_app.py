@@ -28,12 +28,12 @@ from app.academic_calendar_service import (
     CALENDAR_TYPES,
     SCOPE_TYPES,
     calendar_summary_counts,
-    create_calendar_entry,
+    create_calendar_entry_result,
     get_calendar_entry,
     list_calendar_entries,
     reference_calendar_df,
-    set_calendar_entry_active,
-    update_calendar_entry,
+    set_calendar_entry_active_result,
+    update_calendar_entry_result,
 )
 from app.audit_service import list_audit_events, log_audit_event
 from app.backup_database import backup_database
@@ -1724,6 +1724,19 @@ def _calendar_scope_fields(prefix: str, scope_type: str, current: dict | None = 
     return payload
 
 
+def _show_calendar_write_result(result: dict, success_message: str) -> None:
+    if result.get("success"):
+        st.success(success_message)
+        backup_result = result.get("backup_result") or {}
+        backup_message = backup_result.get("safe_message")
+        if backup_message:
+            st.info(str(backup_message))
+        for warning in result.get("warnings", []):
+            st.warning(warning)
+    else:
+        st.error(result.get("safe_message") or "Calendar operation failed.")
+
+
 def page_academic_calendar() -> None:
     render_app_header("Academic Calendar", "Manage class exclusions for claims and attendance registers.", badge="Admin")
     st.info("Calendar entries affect generated sessions. Verify institutional calendar entries before relying on them for claims.")
@@ -1791,10 +1804,13 @@ def page_academic_calendar() -> None:
                     "notes": notes,
                     **scope_payload,
                 }
-                entry_id = create_calendar_entry(data, user=current_user())
-                st.success(f"Calendar exclusion saved. ID: {entry_id}")
+                result = create_calendar_entry_result(data, user=current_user())
+                message = "Calendar exclusion saved."
+                if result.get("entry_id"):
+                    message = f"Calendar exclusion saved. ID: {result['entry_id']}"
+                _show_calendar_write_result(result, message)
             except Exception as exc:
-                show_error("Calendar exclusion could not be saved.", exc)
+                show_error("Calendar exclusion save failed unexpectedly.", exc)
 
     with update_tab:
         all_entries = list_calendar_entries()
@@ -1846,23 +1862,23 @@ def page_academic_calendar() -> None:
                         "notes": notes,
                         **scope_payload,
                     }
-                    update_calendar_entry(int(selected_id), data, user=current_user())
-                    st.success("Calendar exclusion updated.")
+                    result = update_calendar_entry_result(int(selected_id), data, user=current_user())
+                    _show_calendar_write_result(result, "Calendar exclusion updated.")
                 except Exception as exc:
-                    show_error("Calendar exclusion could not be updated.", exc)
+                    show_error("Calendar exclusion update failed unexpectedly.", exc)
             action_cols = st.columns(2)
             if action_cols[0].button("Deactivate selected entry", disabled=not bool(selected.get("active", 1))):
                 try:
-                    set_calendar_entry_active(int(selected_id), False, user=current_user())
-                    st.success("Calendar exclusion deactivated.")
+                    result = set_calendar_entry_active_result(int(selected_id), False, user=current_user())
+                    _show_calendar_write_result(result, "Calendar exclusion deactivated.")
                 except Exception as exc:
-                    show_error("Calendar exclusion could not be deactivated.", exc)
+                    show_error("Calendar exclusion deactivation failed unexpectedly.", exc)
             if action_cols[1].button("Reactivate selected entry", disabled=bool(selected.get("active", 1))):
                 try:
-                    set_calendar_entry_active(int(selected_id), True, user=current_user())
-                    st.success("Calendar exclusion reactivated.")
+                    result = set_calendar_entry_active_result(int(selected_id), True, user=current_user())
+                    _show_calendar_write_result(result, "Calendar exclusion reactivated.")
                 except Exception as exc:
-                    show_error("Calendar exclusion could not be reactivated.", exc)
+                    show_error("Calendar exclusion reactivation failed unexpectedly.", exc)
 
     with reference_tab:
         st.info("Reference list from the 2026 NUST Institutional Calendar. Compare manually before relying on entries for claims.")

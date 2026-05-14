@@ -5,12 +5,15 @@ import app.academic_calendar_service as academic_calendar_service
 from app.academic_calendar_service import (
     calendar_exclusion_applies,
     create_calendar_entry,
+    create_calendar_entry_result,
     ensure_academic_calendar_schema,
     get_calendar_entry,
     list_calendar_entries,
     reference_calendar_df,
     set_calendar_entry_active,
+    set_calendar_entry_active_result,
     update_calendar_entry,
+    update_calendar_entry_result,
     validate_calendar_data,
 )
 from app.database import get_connection, init_db
@@ -123,6 +126,46 @@ def test_calendar_validation_rejects_invalid_date_and_time_ranges():
     assert "End time must be after start time." in errors
 
 
+def test_calendar_validation_accepts_full_day_all_scope_with_blank_times():
+    _clear_calendar_db()
+
+    is_valid, errors = validate_calendar_data(
+        {
+            "title": "Institutional Recess",
+            "calendar_type": "Academic Recess",
+            "start_date": "2026-05-26",
+            "end_date": "2026-05-27",
+            "start_time": "",
+            "end_time": "",
+            "scope_type": "all",
+            "exclude_from_claims_and_registers": True,
+            "notes": "Institution closed",
+        }
+    )
+
+    assert is_valid is True
+    assert errors == []
+
+
+def test_calendar_validation_blocks_one_missing_time():
+    _clear_calendar_db()
+
+    is_valid, errors = validate_calendar_data(
+        {
+            "title": "Partial closure",
+            "calendar_type": "Academic Recess",
+            "start_date": "2026-05-26",
+            "end_date": "2026-05-26",
+            "start_time": "10:00",
+            "end_time": "",
+            "scope_type": "all",
+        }
+    )
+
+    assert is_valid is False
+    assert "Both start time and end time are required for a time-bound exclusion." in errors
+
+
 def test_list_calendar_entries_filters_are_not_ambiguous():
     _seed_calendar_scope_data()
 
@@ -198,6 +241,141 @@ def test_calendar_create_update_deactivate_reactivate(monkeypatch):
     assert get_calendar_entry(entry_id)["active"] == 0
     set_calendar_entry_active(entry_id, True)
     assert get_calendar_entry(entry_id)["active"] == 1
+
+
+def test_calendar_full_day_all_scope_create_result_saves_successfully(monkeypatch):
+    _clear_calendar_db()
+    monkeypatch.setattr("app.academic_calendar_service._backup", lambda prefix: {"performed": True, "mode": "sqlite", "safe_message": "backup", "path": "backup.db"})
+    monkeypatch.setattr("app.academic_calendar_service.log_audit_event", lambda *args, **kwargs: None)
+
+    result = create_calendar_entry_result(
+        {
+            "title": "Institutional Recess",
+            "calendar_type": "Academic Recess",
+            "start_date": "2026-05-26",
+            "end_date": "2026-05-27",
+            "start_time": "",
+            "end_time": "",
+            "scope_type": "all",
+            "exclude_from_claims_and_registers": True,
+            "notes": "Institutional Recess - Institution closed",
+        }
+    )
+
+    assert result["success"] is True
+    assert result["safe_message"] == "Calendar exclusion saved."
+    saved = get_calendar_entry(result["entry_id"])
+    assert saved["title"] == "Institutional Recess"
+    assert saved["start_time"] is None
+    assert saved["end_time"] is None
+    assert saved["scope_type"] == "all"
+    assert saved["lecturer_id"] is None
+    assert saved["course_id"] is None
+    assert saved["group_id"] is None
+
+
+def test_calendar_postgresql_insert_path_skips_local_sqlite_backup(monkeypatch):
+    state = {"committed": False, "insert_sql": "", "insert_params": None}
+
+    class FakeResult:
+        def __init__(self, row=None):
+            self.row = row
+            self.lastrowid = 0
+
+        def fetchone(self):
+            return self.row
+
+        def fetchall(self):
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=()):
+            sql_text = " ".join(str(sql).lower().split())
+            if "select ac.id as id from academic_calendar" in sql_text:
+                return FakeResult(None)
+            if sql_text.startswith("insert into academic_calendar"):
+                state["insert_sql"] = str(sql)
+                state["insert_params"] = params
+                return FakeResult({"id": 501})
+            raise AssertionError(f"Unexpected SQL: {sql}")
+
+        def commit(self):
+            state["committed"] = True
+
+    def fail_backup(*args, **kwargs):
+        raise AssertionError("SQLite backup should not be called in PostgreSQL mode")
+
+    monkeypatch.setattr("app.academic_calendar_service.database_provider", lambda: "postgresql")
+    monkeypatch.setattr("app.academic_calendar_service.backup_database", fail_backup)
+    monkeypatch.setattr("app.academic_calendar_service.get_runtime_connection", lambda: FakeConnection())
+    monkeypatch.setattr("app.academic_calendar_service.convert_placeholders", lambda sql: sql.replace("?", "%s"))
+    monkeypatch.setattr("app.academic_calendar_service.log_audit_event", lambda *args, **kwargs: None)
+
+    result = create_calendar_entry_result(
+        {
+            "title": "Institutional Recess",
+            "calendar_type": "Academic Recess",
+            "start_date": "2026-05-26",
+            "end_date": "2026-05-27",
+            "scope_type": "all",
+            "exclude_from_claims_and_registers": True,
+            "notes": "Institution closed",
+        }
+    )
+
+    assert result["success"] is True
+    assert result["entry_id"] == 501
+    assert result["backup_result"]["performed"] is False
+    assert result["backup_result"]["mode"] == "postgresql"
+    assert "RETURNING id" in state["insert_sql"]
+    assert "%s" in state["insert_sql"]
+    assert state["insert_params"][0] == "Institutional Recess"
+    assert state["insert_params"][6] is None
+    assert state["insert_params"][7] is None
+    assert state["insert_params"][8] == "all"
+    assert state["committed"] is True
+
+
+def test_calendar_update_and_status_result_paths_return_safe_messages(monkeypatch):
+    _clear_calendar_db()
+    monkeypatch.setattr("app.academic_calendar_service._backup", lambda prefix: {"performed": True, "mode": "sqlite", "safe_message": "backup", "path": "backup.db"})
+    monkeypatch.setattr("app.academic_calendar_service.log_audit_event", lambda *args, **kwargs: None)
+    entry_id = create_calendar_entry(
+        {
+            "title": "Closure",
+            "calendar_type": "Academic Recess",
+            "start_date": "2026-05-26",
+            "end_date": "2026-05-26",
+            "scope_type": "all",
+        }
+    )
+
+    update_result = update_calendar_entry_result(
+        entry_id,
+        {
+            "title": "Updated closure",
+            "calendar_type": "Academic Recess",
+            "start_date": "2026-05-26",
+            "end_date": "2026-05-27",
+            "scope_type": "all",
+            "active": True,
+        },
+    )
+    deactivate_result = set_calendar_entry_active_result(entry_id, False)
+    reactivate_result = set_calendar_entry_active_result(entry_id, True)
+
+    assert update_result["success"] is True
+    assert update_result["safe_message"] == "Calendar exclusion updated."
+    assert deactivate_result["success"] is True
+    assert deactivate_result["safe_message"] == "Calendar exclusion deactivated."
+    assert reactivate_result["success"] is True
+    assert reactivate_result["safe_message"] == "Calendar exclusion reactivated."
 
 
 def test_calendar_exclusion_applies_for_full_day_and_time_overlap():

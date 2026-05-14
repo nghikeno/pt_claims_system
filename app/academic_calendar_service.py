@@ -10,7 +10,7 @@ from app.backup_database import backup_database
 from app.config import database_provider
 from app.data_validation import parse_bool, parse_date_value, parse_time_value
 from app.db_provider import convert_placeholders, get_runtime_connection, row_to_dict, rows_to_dicts
-from app.database import get_connection, init_db
+from app.database import init_db
 from app.validators import parse_date
 
 
@@ -68,6 +68,20 @@ def _normalise_category(value: Any) -> str:
 
 def _calendar_type_slug(value: Any) -> str:
     return _normalise_category(value).lower().replace(" ", "_").replace("-", "_")
+
+
+def _calendar_result(success: bool, stage: str, safe_message: str, **extra) -> dict[str, Any]:
+    return {
+        "success": success,
+        "stage": stage,
+        "safe_message": safe_message,
+        "warnings": extra.pop("warnings", []),
+        **extra,
+    }
+
+
+def _log_calendar_diagnostic(stage: str, exc: Exception) -> None:
+    print(f"CALENDAR_WRITE_DIAGNOSTIC stage={stage} exception={type(exc).__name__}")
 
 
 def ensure_academic_calendar_schema() -> None:
@@ -255,74 +269,201 @@ def _clean_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _backup(prefix: str) -> None:
-    backup_database(prefix=prefix)
+def _backup(prefix: str) -> dict[str, Any]:
+    provider = database_provider()
+    if provider != "sqlite":
+        return {
+            "performed": False,
+            "mode": provider,
+            "safe_message": "Production PostgreSQL mode: local SQLite backup skipped; provider backup/audit applies.",
+            "path": None,
+        }
+    path = backup_database(prefix=prefix)
+    return {
+        "performed": True,
+        "mode": provider,
+        "safe_message": "Local SQLite backup created before calendar write.",
+        "path": path,
+    }
 
 
-def create_calendar_entry(data: dict[str, Any], user: dict | None = None) -> int:
+def _commit_if_supported(conn: Any) -> None:
+    if hasattr(conn, "commit"):
+        conn.commit()
+
+
+def _audit_calendar_event(action: str, entry_id: int, title: str, user: dict | None = None) -> str | None:
+    try:
+        log_audit_event(
+            action,
+            user=user,
+            entity_type="academic_calendar",
+            entity_id=entry_id,
+            details={"title": title},
+        )
+    except Exception as exc:
+        _log_calendar_diagnostic("audit", exc)
+        return "Audit logging did not complete, but the calendar change was saved."
+    return None
+
+
+def create_calendar_entry_result(data: dict[str, Any], user: dict | None = None) -> dict[str, Any]:
     is_valid, errors = validate_calendar_data(data)
     if not is_valid:
-        raise ValueError("; ".join(errors))
+        return _calendar_result(False, "validation", "; ".join(errors))
     payload = _clean_payload(data)
     now = _now()
-    _backup("pt_claims_before_calendar_add")
-    with get_connection() as conn:
-        cur = conn.execute(
-            """
+    try:
+        backup_result = _backup("pt_claims_before_calendar_add")
+    except Exception as exc:
+        _log_calendar_diagnostic("backup", exc)
+        return _calendar_result(False, "backup", "Calendar exclusion could not be saved during local backup.")
+    try:
+        insert_sql = """
             INSERT INTO academic_calendar (
                 title, start_date, end_date, calendar_type, action, allow_override,
                 start_time, end_time, scope_type, lecturer_id, course_id, group_id,
                 exclude_from_claims_and_registers, notes, active, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                payload["title"], payload["start_date"], payload["end_date"], payload["calendar_type"],
-                payload["action"], payload["allow_override"], payload["start_time"], payload["end_time"],
-                payload["scope_type"], payload["lecturer_id"], payload["course_id"], payload["group_id"],
-                payload["exclude_from_claims_and_registers"], payload["notes"], payload["active"], now, now,
-            ),
-        )
-        entry_id = int(cur.lastrowid)
-    log_audit_event("calendar_add", user=user, entity_type="academic_calendar", entity_id=entry_id, details={"title": payload["title"]})
-    return entry_id
+        """
+        if database_provider() != "sqlite":
+            insert_sql += " RETURNING id"
+        with get_runtime_connection() as conn:
+            cur = conn.execute(
+                convert_placeholders(insert_sql),
+                (
+                    payload["title"], payload["start_date"], payload["end_date"], payload["calendar_type"],
+                    payload["action"], payload["allow_override"], payload["start_time"], payload["end_time"],
+                    payload["scope_type"], payload["lecturer_id"], payload["course_id"], payload["group_id"],
+                    payload["exclude_from_claims_and_registers"], payload["notes"], payload["active"], now, now,
+                ),
+            )
+            if database_provider() == "sqlite":
+                entry_id = int(cur.lastrowid)
+            else:
+                inserted = row_to_dict(cur.fetchone())
+                entry_id = int(inserted["id"])
+            _commit_if_supported(conn)
+    except Exception as exc:
+        _log_calendar_diagnostic("calendar_insert", exc)
+        return _calendar_result(False, "calendar_insert", "Calendar exclusion could not be saved during calendar insert.")
+
+    warnings: list[str] = []
+    audit_warning = _audit_calendar_event("calendar_add", entry_id, payload["title"], user=user)
+    if audit_warning:
+        warnings.append(audit_warning)
+    return _calendar_result(
+        True,
+        "complete",
+        "Calendar exclusion saved.",
+        entry_id=entry_id,
+        backup_result=backup_result,
+        warnings=warnings,
+    )
+
+
+def create_calendar_entry(data: dict[str, Any], user: dict | None = None) -> int:
+    result = create_calendar_entry_result(data, user=user)
+    if not result["success"]:
+        raise ValueError(result["safe_message"])
+    return int(result["entry_id"])
+
+
+def update_calendar_entry_result(entry_id: int, data: dict[str, Any], user: dict | None = None) -> dict[str, Any]:
+    if get_calendar_entry(entry_id) is None:
+        return _calendar_result(False, "lookup", "Calendar entry not found.")
+    is_valid, errors = validate_calendar_data(data, exclude_id=int(entry_id))
+    if not is_valid:
+        return _calendar_result(False, "validation", "; ".join(errors), entry_id=int(entry_id))
+    payload = _clean_payload(data)
+    try:
+        backup_result = _backup("pt_claims_before_calendar_update")
+    except Exception as exc:
+        _log_calendar_diagnostic("backup", exc)
+        return _calendar_result(False, "backup", "Calendar exclusion could not be updated during local backup.", entry_id=int(entry_id))
+    try:
+        with get_runtime_connection() as conn:
+            conn.execute(
+                convert_placeholders(
+                    """
+                    UPDATE academic_calendar
+                    SET title = ?, start_date = ?, end_date = ?, calendar_type = ?, action = ?,
+                        start_time = ?, end_time = ?, scope_type = ?, lecturer_id = ?, course_id = ?,
+                        group_id = ?, exclude_from_claims_and_registers = ?, notes = ?, active = ?, updated_at = ?
+                    WHERE id = ?
+                    """
+                ),
+                (
+                    payload["title"], payload["start_date"], payload["end_date"], payload["calendar_type"],
+                    payload["action"], payload["start_time"], payload["end_time"], payload["scope_type"],
+                    payload["lecturer_id"], payload["course_id"], payload["group_id"],
+                    payload["exclude_from_claims_and_registers"], payload["notes"], payload["active"], _now(), int(entry_id),
+                ),
+            )
+            _commit_if_supported(conn)
+    except Exception as exc:
+        _log_calendar_diagnostic("calendar_update", exc)
+        return _calendar_result(False, "calendar_update", "Calendar exclusion could not be updated during calendar update.", entry_id=int(entry_id))
+    warnings: list[str] = []
+    audit_warning = _audit_calendar_event("calendar_update", int(entry_id), payload["title"], user=user)
+    if audit_warning:
+        warnings.append(audit_warning)
+    return _calendar_result(
+        True,
+        "complete",
+        "Calendar exclusion updated.",
+        entry_id=int(entry_id),
+        backup_result=backup_result,
+        warnings=warnings,
+    )
 
 
 def update_calendar_entry(entry_id: int, data: dict[str, Any], user: dict | None = None) -> int:
-    if get_calendar_entry(entry_id) is None:
-        raise ValueError("Calendar entry not found.")
-    is_valid, errors = validate_calendar_data(data, exclude_id=int(entry_id))
-    if not is_valid:
-        raise ValueError("; ".join(errors))
-    payload = _clean_payload(data)
-    _backup("pt_claims_before_calendar_update")
-    with get_connection() as conn:
-        conn.execute(
-            """
-            UPDATE academic_calendar
-            SET title = ?, start_date = ?, end_date = ?, calendar_type = ?, action = ?,
-                start_time = ?, end_time = ?, scope_type = ?, lecturer_id = ?, course_id = ?,
-                group_id = ?, exclude_from_claims_and_registers = ?, notes = ?, active = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                payload["title"], payload["start_date"], payload["end_date"], payload["calendar_type"],
-                payload["action"], payload["start_time"], payload["end_time"], payload["scope_type"],
-                payload["lecturer_id"], payload["course_id"], payload["group_id"],
-                payload["exclude_from_claims_and_registers"], payload["notes"], payload["active"], _now(), int(entry_id),
-            ),
-        )
-    log_audit_event("calendar_update", user=user, entity_type="academic_calendar", entity_id=entry_id, details={"title": payload["title"]})
-    return int(entry_id)
+    result = update_calendar_entry_result(entry_id, data, user=user)
+    if not result["success"]:
+        raise ValueError(result["safe_message"])
+    return int(result["entry_id"])
+
+
+def set_calendar_entry_active_result(entry_id: int, active: bool, user: dict | None = None) -> dict[str, Any]:
+    current = get_calendar_entry(entry_id)
+    if current is None:
+        return _calendar_result(False, "lookup", "Calendar entry not found.", entry_id=int(entry_id))
+    try:
+        backup_result = _backup("pt_claims_before_calendar_reactivate" if active else "pt_claims_before_calendar_deactivate")
+    except Exception as exc:
+        _log_calendar_diagnostic("backup", exc)
+        return _calendar_result(False, "backup", "Calendar exclusion status could not be changed during local backup.", entry_id=int(entry_id))
+    try:
+        with get_runtime_connection() as conn:
+            conn.execute(
+                convert_placeholders("UPDATE academic_calendar SET active = ?, updated_at = ? WHERE id = ?"),
+                (1 if active else 0, _now(), int(entry_id)),
+            )
+            _commit_if_supported(conn)
+    except Exception as exc:
+        _log_calendar_diagnostic("calendar_status_update", exc)
+        return _calendar_result(False, "calendar_status_update", "Calendar exclusion status could not be changed during calendar update.", entry_id=int(entry_id))
+    action = "calendar_reactivate" if active else "calendar_deactivate"
+    warnings: list[str] = []
+    audit_warning = _audit_calendar_event(action, int(entry_id), str(current.get("title") or ""), user=user)
+    if audit_warning:
+        warnings.append(audit_warning)
+    return _calendar_result(
+        True,
+        "complete",
+        "Calendar exclusion reactivated." if active else "Calendar exclusion deactivated.",
+        entry_id=int(entry_id),
+        backup_result=backup_result,
+        warnings=warnings,
+    )
 
 
 def set_calendar_entry_active(entry_id: int, active: bool, user: dict | None = None) -> None:
-    if get_calendar_entry(entry_id) is None:
-        raise ValueError("Calendar entry not found.")
-    _backup("pt_claims_before_calendar_reactivate" if active else "pt_claims_before_calendar_deactivate")
-    with get_connection() as conn:
-        conn.execute("UPDATE academic_calendar SET active = ?, updated_at = ? WHERE id = ?", (1 if active else 0, _now(), int(entry_id)))
-    log_audit_event("calendar_reactivate" if active else "calendar_deactivate", user=user, entity_type="academic_calendar", entity_id=entry_id)
+    result = set_calendar_entry_active_result(entry_id, active, user=user)
+    if not result["success"]:
+        raise ValueError(result["safe_message"])
 
 
 def reference_calendar_df() -> pd.DataFrame:
