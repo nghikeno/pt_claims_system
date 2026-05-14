@@ -145,6 +145,20 @@ def test_account_management_reset_does_not_use_old_generic_failure_message():
     assert "reset_user_password" in account_page
 
 
+def test_account_management_has_admin_only_create_lecturer_account_gui():
+    source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
+    account_page = source.split("def page_account_management", 1)[1].split("def page_audit_log", 1)[0]
+
+    assert "Create lecturer account" in account_page
+    assert "Lecturer without account" in account_page
+    assert "list_lecturers_without_accounts" in account_page
+    assert "create_lecturer_account_for_lecturer" in account_page
+    assert "Temporary password" in account_page
+    assert "Confirm temporary password" in account_page
+    assert "Communicate it outside the system" in account_page
+    assert "type=\"password\"" in account_page
+
+
 def test_lecturer_staff_number_correction_is_separate_admin_panel():
     source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
     lecturer_entry = source.split("def page_lecturer_entry", 1)[1].split("def _course_form_fields", 1)[0]

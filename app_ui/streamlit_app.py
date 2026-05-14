@@ -18,7 +18,12 @@ from app.auth_service import (
     count_admin_accounts,
     lecturer_scoped_staff_number,
 )
-from app.account_admin_service import list_user_accounts, reset_user_password
+from app.account_admin_service import (
+    create_lecturer_account_for_lecturer,
+    list_lecturers_without_accounts,
+    list_user_accounts,
+    reset_user_password,
+)
 from app.academic_calendar_service import (
     CALENDAR_TYPES,
     SCOPE_TYPES,
@@ -2804,7 +2809,42 @@ def page_development() -> None:
 
 
 def page_account_management() -> None:
-    render_app_header("Account Management", "Admin-only account review and lecturer password reset.", badge="Admin")
+    render_app_header("Account Management", "Admin-only account review, lecturer account creation, and password reset.", badge="Admin")
+    st.subheader("Create lecturer account")
+    missing_accounts = list_lecturers_without_accounts()
+    if missing_accounts.empty:
+        st.info("All lecturers already have lecturer login accounts.")
+    else:
+        display_missing = missing_accounts[["staff_number", "full_name", "active", "account_exists"]].copy()
+        st.dataframe(display_missing, width="stretch")
+        missing_records = missing_accounts.to_dict("records")
+        create_labels = {
+            f"{record['staff_number']} - {record['full_name']}": int(record["lecturer_id"])
+            for record in missing_records
+        }
+        selected_create_label = st.selectbox(
+            "Lecturer without account",
+            list(create_labels.keys()),
+            key="account_create_lecturer",
+        )
+        create_temp_password = st.text_input("Temporary password", type="password", key="account_create_temp")
+        create_confirm_password = st.text_input("Confirm temporary password", type="password", key="account_create_confirm")
+        st.info("The lecturer must change this temporary password at next login. Communicate it outside the system.")
+        if st.button("Create lecturer account"):
+            result = create_lecturer_account_for_lecturer(
+                current_user(),
+                create_labels[selected_create_label],
+                create_temp_password,
+                create_confirm_password,
+            )
+            if result.get("success"):
+                st.success(result["safe_message"])
+                for warning in result.get("warnings", []):
+                    st.warning(warning)
+            else:
+                st.error(result["safe_message"])
+
+    st.subheader("Existing accounts")
     users = list_user_accounts()
     if users.empty:
         st.info("No user accounts found.")
