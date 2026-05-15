@@ -1,4 +1,5 @@
 from app.database import get_connection, init_db
+from app.academic_calendar_service import import_nust_2026_exclusions
 from app.session_generator import generate_monthly_sessions
 
 
@@ -226,3 +227,60 @@ def test_academic_recess_in_may_custom_period_reduces_sessions_and_records_appli
     assert float(filtered["hours"].sum()) == float(baseline["hours"].sum()) - 1.0
     assert filtered.attrs["applied_calendar_exclusions"][0]["title"] == "Institutional Recess"
     assert any(detail["session_date"] == "2026-05-26" for detail in filtered.attrs["excluded_session_details"])
+
+
+def test_imported_nust_exclusions_remove_good_friday_and_easter_monday_from_april_sessions(monkeypatch):
+    _reset_minimal_session_data()
+    monkeypatch.setattr("app.academic_calendar_service._backup", lambda prefix: {"performed": True, "mode": "sqlite", "safe_message": "backup", "path": "backup.db"})
+    monkeypatch.setattr("app.academic_calendar_service.log_audit_event", lambda *args, **kwargs: None)
+    with get_connection() as conn:
+        conn.execute("DELETE FROM timetable_entries")
+        conn.execute(
+            """
+            INSERT INTO timetable_entries (
+                lecturer_id, group_id, day_of_week, start_time, end_time,
+                effective_start_date, effective_end_date, active
+            )
+            VALUES
+                (101, 301, 'Friday', '10:00', '11:00', '2026-04-01', '2026-04-30', 1),
+                (101, 301, 'Monday', '10:00', '11:00', '2026-04-01', '2026-04-30', 1)
+            """
+        )
+    baseline_dates = set(generate_monthly_sessions(900101, 2026, 4)["session_date"])
+
+    import_nust_2026_exclusions(confirm_phrase="IMPORT NUST EXCLUSIONS", dry_run=False)
+    filtered_dates = set(generate_monthly_sessions(900101, 2026, 4)["session_date"])
+
+    assert "2026-04-03" in baseline_dates
+    assert "2026-04-06" in baseline_dates
+    assert "2026-04-03" not in filtered_dates
+    assert "2026-04-06" not in filtered_dates
+
+
+def test_imported_nust_exclusions_remove_may_recess_and_holiday_from_sessions(monkeypatch):
+    _reset_minimal_session_data()
+    monkeypatch.setattr("app.academic_calendar_service._backup", lambda prefix: {"performed": True, "mode": "sqlite", "safe_message": "backup", "path": "backup.db"})
+    monkeypatch.setattr("app.academic_calendar_service.log_audit_event", lambda *args, **kwargs: None)
+    with get_connection() as conn:
+        conn.execute("DELETE FROM timetable_entries")
+        conn.execute(
+            """
+            INSERT INTO timetable_entries (
+                lecturer_id, group_id, day_of_week, start_time, end_time,
+                effective_start_date, effective_end_date, active
+            )
+            VALUES
+                (101, 301, 'Tuesday', '10:00', '11:00', '2026-05-01', '2026-05-31', 1),
+                (101, 301, 'Wednesday', '10:00', '11:00', '2026-05-01', '2026-05-31', 1),
+                (101, 301, 'Thursday', '10:00', '11:00', '2026-05-01', '2026-05-31', 1),
+                (101, 301, 'Friday', '10:00', '11:00', '2026-05-01', '2026-05-31', 1)
+            """
+        )
+
+    import_nust_2026_exclusions(confirm_phrase="IMPORT NUST EXCLUSIONS", dry_run=False)
+    filtered_dates = set(generate_monthly_sessions(900101, 2026, 5)["session_date"])
+
+    assert "2026-05-26" not in filtered_dates
+    assert "2026-05-27" not in filtered_dates
+    assert "2026-05-28" not in filtered_dates
+    assert "2026-05-29" not in filtered_dates

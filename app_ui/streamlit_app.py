@@ -26,10 +26,13 @@ from app.account_admin_service import (
 )
 from app.academic_calendar_service import (
     CALENDAR_TYPES,
+    NUST_2026_IMPORT_CONFIRMATION,
     SCOPE_TYPES,
     calendar_summary_counts,
     create_calendar_entry_result,
     get_calendar_entry,
+    get_nust_2026_exclusion_import_plan,
+    import_nust_2026_exclusions,
     list_calendar_entries,
     reference_calendar_df,
     set_calendar_entry_active_result,
@@ -1740,10 +1743,11 @@ def _show_calendar_write_result(result: dict, success_message: str) -> None:
 def page_academic_calendar() -> None:
     render_app_header("Academic Calendar", "Manage class exclusions for claims and attendance registers.", badge="Admin")
     st.info("Calendar entries affect generated sessions. Verify institutional calendar entries before relying on them for claims.")
-    view_tab, add_tab, update_tab, reference_tab = st.tabs([
+    view_tab, add_tab, update_tab, import_tab, reference_tab = st.tabs([
         "Existing exclusions",
         "Add exclusion",
         "Update / deactivate",
+        "Import NUST exclusions",
         "NUST 2026 reference",
     ])
 
@@ -1879,6 +1883,38 @@ def page_academic_calendar() -> None:
                     _show_calendar_write_result(result, "Calendar exclusion reactivated.")
                 except Exception as exc:
                     show_error("Calendar exclusion reactivation failed unexpectedly.", exc)
+
+    with import_tab:
+        st.warning(
+            "This will activate official NUST 2026 exclusion dates for claims and attendance registers. "
+            "Previously generated documents for affected periods must be regenerated."
+        )
+        plan = get_nust_2026_exclusion_import_plan()
+        st.write(
+            f"Preview: {plan['inserts']} insert(s), {plan['skipped']} skipped, "
+            f"{plan['conflicts']} conflict(s), {plan.get('inactive_matches', 0)} inactive matching row(s)."
+        )
+        st.dataframe(pd.DataFrame(plan["preview_rows"]), width="stretch")
+        reviewed = st.checkbox("I reviewed the NUST exclusion preview.", key="nust_import_reviewed")
+        confirmation = st.text_input(
+            f'Type "{NUST_2026_IMPORT_CONFIRMATION}" to confirm',
+            key="nust_import_confirmation",
+        )
+        if st.button(
+            "Import NUST exclusions",
+            disabled=not (reviewed and confirmation == NUST_2026_IMPORT_CONFIRMATION),
+            key="nust_import_button",
+        ):
+            try:
+                result = import_nust_2026_exclusions(
+                    confirm_phrase=confirmation,
+                    dry_run=False,
+                    user=current_user(),
+                )
+                _show_calendar_write_result(result, result.get("safe_message", "NUST exclusions imported."))
+                st.dataframe(pd.DataFrame(result.get("preview_rows", [])), width="stretch")
+            except Exception as exc:
+                show_error("NUST exclusion import failed unexpectedly.", exc)
 
     with reference_tab:
         st.info("Reference list from the 2026 NUST Institutional Calendar. Compare manually before relying on entries for claims.")

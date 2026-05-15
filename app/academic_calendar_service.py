@@ -24,6 +24,8 @@ CALENDAR_TYPES = [
     "Other",
 ]
 SCOPE_TYPES = ["all", "lecturer", "course", "group"]
+NUST_2026_IMPORT_CONFIRMATION = "IMPORT NUST EXCLUSIONS"
+NUST_2026_IMPORT_SOURCE = "NUST 2026 Institutional Calendar"
 
 
 NUST_2026_REFERENCE_ITEMS = [
@@ -50,6 +52,34 @@ NUST_2026_REFERENCE_ITEMS = [
     {"title": "Day of the Namibian Women and International Human Rights Day", "start_date": "2026-12-10", "end_date": "2026-12-10", "category": "Public Holiday"},
     {"title": "Christmas Day", "start_date": "2026-12-25", "end_date": "2026-12-25", "category": "Public Holiday"},
     {"title": "Family Day", "start_date": "2026-12-26", "end_date": "2026-12-26", "category": "Public Holiday"},
+]
+
+
+NUST_2026_EXCLUSION_IMPORT_ITEMS = [
+    {"title": "New Year's Day", "start_date": "2026-01-01", "end_date": "2026-01-01", "calendar_type": "Public Holiday"},
+    {"title": "Independence Day", "start_date": "2026-03-21", "end_date": "2026-03-21", "calendar_type": "Public Holiday"},
+    {"title": "First Semester Mid-Semester Break", "start_date": "2026-03-30", "end_date": "2026-04-02", "calendar_type": "Academic Recess"},
+    {"title": "Good Friday", "start_date": "2026-04-03", "end_date": "2026-04-03", "calendar_type": "Public Holiday"},
+    {"title": "Easter Sunday", "start_date": "2026-04-05", "end_date": "2026-04-05", "calendar_type": "Public Holiday"},
+    {"title": "Easter Monday", "start_date": "2026-04-06", "end_date": "2026-04-06", "calendar_type": "Public Holiday"},
+    {"title": "Workers' Day", "start_date": "2026-05-01", "end_date": "2026-05-01", "calendar_type": "Public Holiday"},
+    {"title": "Cassinga Day", "start_date": "2026-05-04", "end_date": "2026-05-04", "calendar_type": "Public Holiday"},
+    {"title": "Ascension Day", "start_date": "2026-05-14", "end_date": "2026-05-14", "calendar_type": "Public Holiday"},
+    {"title": "Africa Day", "start_date": "2026-05-25", "end_date": "2026-05-25", "calendar_type": "Public Holiday"},
+    {"title": "Institutional Recess", "start_date": "2026-05-26", "end_date": "2026-05-27", "calendar_type": "Academic Recess"},
+    {"title": "Genocide Remembrance Day", "start_date": "2026-05-28", "end_date": "2026-05-28", "calendar_type": "Public Holiday"},
+    {"title": "Institutional Holiday", "start_date": "2026-05-29", "end_date": "2026-05-29", "calendar_type": "Institutional Holiday"},
+    {"title": "Mid-Year Recess for Students", "start_date": "2026-06-15", "end_date": "2026-07-10", "calendar_type": "Mid-Year Recess"},
+    {"title": "Heroes' Day", "start_date": "2026-08-26", "end_date": "2026-08-26", "calendar_type": "Public Holiday"},
+    {"title": "Semester 2 Mid-Semester Break", "start_date": "2026-09-07", "end_date": "2026-09-11", "calendar_type": "Academic Recess"},
+    {
+        "title": "Day of the Namibian Women and International Human Rights Day",
+        "start_date": "2026-12-10",
+        "end_date": "2026-12-10",
+        "calendar_type": "Public Holiday",
+    },
+    {"title": "Christmas Day", "start_date": "2026-12-25", "end_date": "2026-12-25", "calendar_type": "Public Holiday"},
+    {"title": "Family Day", "start_date": "2026-12-26", "end_date": "2026-12-26", "calendar_type": "Public Holiday"},
 ]
 
 
@@ -305,6 +335,226 @@ def _audit_calendar_event(action: str, entry_id: int, title: str, user: dict | N
         _log_calendar_diagnostic("audit", exc)
         return "Audit logging did not complete, but the calendar change was saved."
     return None
+
+
+def _nust_import_payload(item: dict[str, str]) -> dict[str, Any]:
+    return {
+        "title": item["title"],
+        "start_date": item["start_date"],
+        "end_date": item["end_date"],
+        "calendar_type": item["calendar_type"],
+        "action": "exclude",
+        "allow_override": 0,
+        "start_time": None,
+        "end_time": None,
+        "scope_type": "all",
+        "lecturer_id": None,
+        "course_id": None,
+        "group_id": None,
+        "exclude_from_claims_and_registers": 1,
+        "notes": NUST_2026_IMPORT_SOURCE,
+        "active": 1,
+    }
+
+
+def _existing_calendar_matches() -> list[dict[str, Any]]:
+    ensure_academic_calendar_schema()
+    with get_runtime_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, title, start_date, end_date, calendar_type, action, scope_type,
+                   lecturer_id, course_id, group_id, active, exclude_from_claims_and_registers
+            FROM academic_calendar
+            """
+        ).fetchall()
+    return rows_to_dicts(rows)
+
+
+def _calendar_scope_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        row.get("start_date"),
+        row.get("end_date"),
+        _clean(row.get("scope_type") or "all").lower(),
+        int(row.get("lecturer_id") or 0),
+        int(row.get("course_id") or 0),
+        int(row.get("group_id") or 0),
+        _clean(row.get("start_time") or ""),
+        _clean(row.get("end_time") or ""),
+    )
+
+
+def _calendar_exact_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        _clean(row.get("title")),
+        _calendar_type_slug(row.get("calendar_type")),
+        _clean(row.get("action") or "exclude").lower(),
+        _calendar_scope_key(row),
+    )
+
+
+def get_nust_2026_exclusion_import_plan() -> dict[str, Any]:
+    existing_rows = _existing_calendar_matches()
+    exact_existing = {_calendar_exact_key(row): row for row in existing_rows}
+    scoped_existing: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for row in existing_rows:
+        scoped_existing.setdefault(_calendar_scope_key(row), []).append(row)
+
+    preview_rows: list[dict[str, Any]] = []
+    inserts = skipped = conflicts = inactive_matches = 0
+    for item in NUST_2026_EXCLUSION_IMPORT_ITEMS:
+        payload = _nust_import_payload(item)
+        exact_key = _calendar_exact_key(payload)
+        scope_key = _calendar_scope_key(payload)
+        status = "insert"
+        existing_id = None
+        reason = "Ready to import."
+        exact_match = exact_existing.get(exact_key)
+        if exact_match:
+            existing_id = exact_match.get("id")
+            if int(exact_match.get("active") or 0) == 1:
+                status = "skip"
+                skipped += 1
+                reason = "Matching active exclusion already exists."
+            else:
+                status = "inactive_match"
+                inactive_matches += 1
+                reason = "Matching exclusion exists but is inactive; review manually before reactivating."
+        elif scoped_existing.get(scope_key):
+            status = "conflict"
+            conflicts += 1
+            reason = "Another exclusion already exists for the same date range and scope with a different title or category."
+        else:
+            inserts += 1
+        preview_rows.append(
+            {
+                "title": payload["title"],
+                "start_date": payload["start_date"],
+                "end_date": payload["end_date"],
+                "calendar_type": payload["calendar_type"],
+                "calendar_type_slug": payload["calendar_type"],
+                "action": payload["action"],
+                "scope_type": payload["scope_type"],
+                "exclude_from_claims_and_registers": payload["exclude_from_claims_and_registers"],
+                "notes": payload["notes"],
+                "status": status,
+                "existing_id": existing_id,
+                "reason": reason,
+            }
+        )
+    return {
+        "success": conflicts == 0,
+        "safe_message": "NUST exclusion import plan prepared.",
+        "inserts": inserts,
+        "updates": 0,
+        "skipped": skipped,
+        "conflicts": conflicts,
+        "inactive_matches": inactive_matches,
+        "warnings": [
+            "Previously generated documents for affected periods must be regenerated after importing exclusions."
+        ],
+        "preview_rows": preview_rows,
+    }
+
+
+def import_nust_2026_exclusions(
+    confirm_phrase: str = "",
+    dry_run: bool = True,
+    user: dict | None = None,
+) -> dict[str, Any]:
+    plan = get_nust_2026_exclusion_import_plan()
+    if dry_run:
+        return {
+            **plan,
+            "success": True,
+            "stage": "dry_run",
+            "safe_message": "NUST exclusion import preview prepared.",
+            "backup_result": None,
+        }
+    if confirm_phrase != NUST_2026_IMPORT_CONFIRMATION:
+        return _calendar_result(
+            False,
+            "confirmation",
+            "Exact confirmation phrase is required before importing NUST exclusions.",
+            **{key: plan[key] for key in ("inserts", "updates", "skipped", "conflicts", "preview_rows")},
+        )
+    if plan["conflicts"] or plan.get("inactive_matches"):
+        return _calendar_result(
+            False,
+            "conflict_check",
+            "NUST exclusions were not imported because existing calendar rows need manual review.",
+            **{key: plan[key] for key in ("inserts", "updates", "skipped", "conflicts", "preview_rows")},
+        )
+    try:
+        backup_result = _backup("pt_claims_before_nust_2026_exclusion_import")
+    except Exception as exc:
+        _log_calendar_diagnostic("backup", exc)
+        return _calendar_result(False, "backup", "NUST exclusions could not be imported during local backup.")
+
+    rows_to_insert = [
+        _nust_import_payload(row)
+        for row in NUST_2026_EXCLUSION_IMPORT_ITEMS
+        if any(
+            preview["title"] == row["title"]
+            and preview["start_date"] == row["start_date"]
+            and preview["end_date"] == row["end_date"]
+            and preview["status"] == "insert"
+            for preview in plan["preview_rows"]
+        )
+    ]
+    now = _now()
+    inserted_count = 0
+    try:
+        with get_runtime_connection() as conn:
+            for payload in rows_to_insert:
+                conn.execute(
+                    convert_placeholders(
+                        """
+                        INSERT INTO academic_calendar (
+                            title, start_date, end_date, calendar_type, action, allow_override,
+                            start_time, end_time, scope_type, lecturer_id, course_id, group_id,
+                            exclude_from_claims_and_registers, notes, active, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """
+                    ),
+                    (
+                        payload["title"], payload["start_date"], payload["end_date"], _calendar_type_slug(payload["calendar_type"]),
+                        payload["action"], payload["allow_override"], payload["start_time"], payload["end_time"],
+                        payload["scope_type"], payload["lecturer_id"], payload["course_id"], payload["group_id"],
+                        payload["exclude_from_claims_and_registers"], payload["notes"], payload["active"], now, now,
+                    ),
+                )
+                inserted_count += 1
+            _commit_if_supported(conn)
+    except Exception as exc:
+        _log_calendar_diagnostic("nust_import", exc)
+        return _calendar_result(False, "calendar_insert", "NUST exclusions could not be imported during calendar insert.")
+
+    warnings = list(plan.get("warnings", []))
+    try:
+        log_audit_event(
+            "nust_2026_exclusions_imported",
+            user=user,
+            entity_type="academic_calendar",
+            entity_id="NUST_2026",
+            details={"inserted": inserted_count, "skipped": plan["skipped"]},
+            success=True,
+        )
+    except Exception as exc:
+        _log_calendar_diagnostic("audit", exc)
+        warnings.append("Audit logging did not complete, but the NUST exclusions were imported.")
+    return _calendar_result(
+        True,
+        "complete",
+        "NUST exclusions imported. Regenerate affected documents before submission.",
+        inserts=inserted_count,
+        updates=0,
+        skipped=plan["skipped"],
+        conflicts=0,
+        preview_rows=get_nust_2026_exclusion_import_plan()["preview_rows"],
+        backup_result=backup_result,
+        warnings=warnings,
+    )
 
 
 def create_calendar_entry_result(data: dict[str, Any], user: dict | None = None) -> dict[str, Any]:

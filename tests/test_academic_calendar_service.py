@@ -8,6 +8,8 @@ from app.academic_calendar_service import (
     create_calendar_entry_result,
     ensure_academic_calendar_schema,
     get_calendar_entry,
+    get_nust_2026_exclusion_import_plan,
+    import_nust_2026_exclusions,
     list_calendar_entries,
     reference_calendar_df,
     set_calendar_entry_active,
@@ -202,6 +204,136 @@ def test_reference_calendar_helper_does_not_depend_on_filtered_sql():
     assert not df.empty
     assert {"title", "start_date", "end_date", "category"}.issubset(df.columns)
     assert "Semester 1 Mid-Semester Break" in set(df["title"])
+
+
+def test_nust_2026_import_plan_contains_required_exclusions_only():
+    _clear_calendar_db()
+
+    plan = get_nust_2026_exclusion_import_plan()
+    rows = plan["preview_rows"]
+    titles = {row["title"]: row for row in rows}
+
+    assert "Good Friday" in titles
+    assert titles["Good Friday"]["start_date"] == "2026-04-03"
+    assert "Easter Monday" in titles
+    assert "First Semester Mid-Semester Break" in titles
+    assert titles["First Semester Mid-Semester Break"]["start_date"] == "2026-03-30"
+    assert titles["First Semester Mid-Semester Break"]["end_date"] == "2026-04-02"
+    assert "Institutional Recess" in titles
+    assert titles["Institutional Recess"]["start_date"] == "2026-05-26"
+    assert titles["Institutional Recess"]["end_date"] == "2026-05-27"
+    assert "Institutional Holiday" in titles
+    assert titles["Institutional Holiday"]["start_date"] == "2026-05-29"
+    assert "Mid-Year Recess for Students" in titles
+    assert titles["Mid-Year Recess for Students"]["start_date"] == "2026-06-15"
+    assert titles["Mid-Year Recess for Students"]["end_date"] == "2026-07-10"
+    assert "Semester 2 Mid-Semester Break" in titles
+    assert titles["Semester 2 Mid-Semester Break"]["start_date"] == "2026-09-07"
+    assert titles["Semester 2 Mid-Semester Break"]["end_date"] == "2026-09-11"
+    assert "Semester 1 Exam Based Courses" not in titles
+    assert "Semester 2 Exam Based Courses" not in titles
+    assert all(row["scope_type"] == "all" for row in rows)
+    assert all(row["action"] == "exclude" for row in rows)
+
+
+def test_nust_2026_import_is_idempotent_and_skips_matching_rows(monkeypatch):
+    _clear_calendar_db()
+    monkeypatch.setattr("app.academic_calendar_service._backup", lambda prefix: {"performed": True, "mode": "sqlite", "safe_message": "backup", "path": "backup.db"})
+    monkeypatch.setattr("app.academic_calendar_service.log_audit_event", lambda *args, **kwargs: None)
+
+    first = import_nust_2026_exclusions(confirm_phrase="IMPORT NUST EXCLUSIONS", dry_run=False)
+    second = import_nust_2026_exclusions(confirm_phrase="IMPORT NUST EXCLUSIONS", dry_run=False)
+
+    assert first["success"] is True
+    assert first["inserts"] >= 19
+    assert second["success"] is True
+    assert second["inserts"] == 0
+    assert second["skipped"] >= 19
+    with get_connection() as conn:
+        count = conn.execute("SELECT COUNT(*) AS count FROM academic_calendar").fetchone()["count"]
+    assert count == first["inserts"]
+
+
+def test_nust_2026_import_requires_confirmation_phrase():
+    _clear_calendar_db()
+
+    result = import_nust_2026_exclusions(confirm_phrase="WRONG", dry_run=False)
+
+    assert result["success"] is False
+    assert result["stage"] == "confirmation"
+
+
+def test_nust_2026_import_conflict_blocks_duplicate_date_scope():
+    _clear_calendar_db()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO academic_calendar (
+                title, start_date, end_date, calendar_type, action, allow_override,
+                scope_type, exclude_from_claims_and_registers, active
+            )
+            VALUES ('Different Good Friday Label', '2026-04-03', '2026-04-03', 'public_holiday', 'exclude', 0, 'all', 1, 1)
+            """
+        )
+
+    result = import_nust_2026_exclusions(confirm_phrase="IMPORT NUST EXCLUSIONS", dry_run=False)
+
+    assert result["success"] is False
+    assert result["stage"] == "conflict_check"
+    assert result["conflicts"] == 1
+
+
+def test_nust_2026_import_uses_provider_connection_in_postgresql_mode(monkeypatch):
+    state = {"committed": False, "insert_count": 0, "insert_sql": ""}
+
+    class FakeResult:
+        def __init__(self, rows=None):
+            self.rows = rows or []
+
+        def fetchall(self):
+            return self.rows
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=()):
+            sql_text = " ".join(str(sql).lower().split())
+            if sql_text.startswith("select id, title"):
+                return FakeResult([])
+            if sql_text.startswith("insert into academic_calendar"):
+                state["insert_count"] += 1
+                state["insert_sql"] = str(sql)
+                assert params[8] == "all"
+                assert params[9] is None
+                assert params[10] is None
+                assert params[11] is None
+                return FakeResult([])
+            raise AssertionError(f"Unexpected SQL: {sql}")
+
+        def commit(self):
+            state["committed"] = True
+
+    def fail_backup(*args, **kwargs):
+        raise AssertionError("SQLite backup should not run in PostgreSQL mode")
+
+    monkeypatch.setattr("app.academic_calendar_service.database_provider", lambda: "postgresql")
+    monkeypatch.setattr("app.academic_calendar_service.backup_database", fail_backup)
+    monkeypatch.setattr("app.academic_calendar_service.get_runtime_connection", lambda: FakeConnection())
+    monkeypatch.setattr("app.academic_calendar_service.convert_placeholders", lambda sql: sql.replace("?", "%s"))
+    monkeypatch.setattr("app.academic_calendar_service.log_audit_event", lambda *args, **kwargs: None)
+
+    result = import_nust_2026_exclusions(confirm_phrase="IMPORT NUST EXCLUSIONS", dry_run=False)
+
+    assert result["success"] is True
+    assert result["inserts"] >= 19
+    assert state["insert_count"] == result["inserts"]
+    assert "%s" in state["insert_sql"]
+    assert state["committed"] is True
+    assert result["backup_result"]["mode"] == "postgresql"
 
 
 def test_calendar_create_update_deactivate_reactivate(monkeypatch):
