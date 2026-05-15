@@ -159,6 +159,18 @@ def test_account_management_has_admin_only_create_lecturer_account_gui():
     assert "type=\"password\"" in account_page
 
 
+def test_academic_calendar_import_nust_exclusions_supports_non_conflicting_rows():
+    source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
+    calendar_page = source.split("def page_academic_calendar", 1)[1].split("def page_timetable_entry", 1)[0]
+
+    assert "Import NUST exclusions" in calendar_page
+    assert "Import only non-conflicting NUST exclusions and leave conflicts for later review." in calendar_page
+    assert "insertable_rows" in calendar_page
+    assert "conflict_rows" in calendar_page
+    assert "inactive_match_rows" in calendar_page
+    assert "allow_non_conflicting=allow_non_conflicting" in calendar_page
+
+
 def test_lecturer_staff_number_correction_is_separate_admin_panel():
     source = Path("app_ui/streamlit_app.py").read_text(encoding="utf-8")
     lecturer_entry = source.split("def page_lecturer_entry", 1)[1].split("def _course_form_fields", 1)[0]

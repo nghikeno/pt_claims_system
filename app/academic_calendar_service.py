@@ -422,7 +422,16 @@ def get_nust_2026_exclusion_import_plan() -> dict[str, Any]:
         elif scoped_existing.get(scope_key):
             status = "conflict"
             conflicts += 1
-            reason = "Another exclusion already exists for the same date range and scope with a different title or category."
+            same_category = any(
+                _calendar_type_slug(existing.get("calendar_type")) == _calendar_type_slug(payload.get("calendar_type"))
+                and _clean(existing.get("action") or "exclude").lower() == "exclude"
+                for existing in scoped_existing.get(scope_key, [])
+            )
+            reason = (
+                "Possible duplicate, review manually."
+                if same_category
+                else "Another exclusion already exists for the same date range and scope with a different title or category."
+            )
         else:
             inserts += 1
         preview_rows.append(
@@ -441,24 +450,38 @@ def get_nust_2026_exclusion_import_plan() -> dict[str, Any]:
                 "reason": reason,
             }
         )
+    inserted_rows = [row for row in preview_rows if row["status"] == "insert"]
+    skipped_rows = [row for row in preview_rows if row["status"] == "skip"]
+    conflict_rows = [row for row in preview_rows if row["status"] == "conflict"]
+    inactive_match_rows = [row for row in preview_rows if row["status"] == "inactive_match"]
     return {
         "success": conflicts == 0,
         "safe_message": "NUST exclusion import plan prepared.",
         "inserts": inserts,
+        "inserted_count": 0,
         "updates": 0,
         "skipped": skipped,
+        "skipped_count": skipped,
         "conflicts": conflicts,
+        "conflict_count": conflicts,
         "inactive_matches": inactive_matches,
+        "inactive_match_count": inactive_matches,
         "warnings": [
             "Previously generated documents for affected periods must be regenerated after importing exclusions."
         ],
         "preview_rows": preview_rows,
+        "inserted_rows": [],
+        "insertable_rows": inserted_rows,
+        "skipped_rows": skipped_rows,
+        "conflict_rows": conflict_rows,
+        "inactive_match_rows": inactive_match_rows,
     }
 
 
 def import_nust_2026_exclusions(
     confirm_phrase: str = "",
     dry_run: bool = True,
+    allow_non_conflicting: bool = False,
     user: dict | None = None,
 ) -> dict[str, Any]:
     plan = get_nust_2026_exclusion_import_plan()
@@ -475,14 +498,49 @@ def import_nust_2026_exclusions(
             False,
             "confirmation",
             "Exact confirmation phrase is required before importing NUST exclusions.",
-            **{key: plan[key] for key in ("inserts", "updates", "skipped", "conflicts", "preview_rows")},
+            **{key: plan[key] for key in ("inserts", "updates", "skipped", "conflicts", "preview_rows", "conflict_rows", "skipped_rows", "inactive_match_rows")},
         )
-    if plan["conflicts"] or plan.get("inactive_matches"):
+    if plan["conflicts"] and not allow_non_conflicting:
         return _calendar_result(
             False,
             "conflict_check",
-            "NUST exclusions were not imported because existing calendar rows need manual review.",
-            **{key: plan[key] for key in ("inserts", "updates", "skipped", "conflicts", "preview_rows")},
+            "NUST exclusions were not imported because existing calendar rows need manual review. You may import only non-conflicting rows.",
+            **{key: plan[key] for key in ("inserts", "updates", "skipped", "conflicts", "preview_rows", "conflict_rows", "skipped_rows", "inactive_match_rows")},
+        )
+    if plan.get("inactive_matches") and not allow_non_conflicting:
+        return _calendar_result(
+            False,
+            "inactive_match_check",
+            "NUST exclusions were not imported because inactive matching rows need manual review. You may import only non-conflicting rows.",
+            **{key: plan[key] for key in ("inserts", "updates", "skipped", "conflicts", "preview_rows", "conflict_rows", "skipped_rows", "inactive_match_rows")},
+        )
+    if plan["inserts"] == 0:
+        if not plan["conflicts"] and not plan.get("inactive_matches"):
+            return _calendar_result(
+                True,
+                "complete",
+                f"NUST exclusions imported: 0 inserted, {plan['skipped']} skipped, 0 conflicts left for review. Regenerate affected documents.",
+                inserts=0,
+                inserted_count=0,
+                updates=0,
+                skipped=plan["skipped"],
+                skipped_count=plan["skipped"],
+                conflicts=0,
+                conflict_count=0,
+                inactive_match_count=0,
+                preview_rows=plan["preview_rows"],
+                inserted_rows=[],
+                skipped_rows=plan["skipped_rows"],
+                conflict_rows=[],
+                inactive_match_rows=[],
+                backup_result=None,
+                warnings=plan.get("warnings", []),
+            )
+        return _calendar_result(
+            False,
+            "nothing_to_import",
+            "No non-conflicting NUST exclusions are available to import.",
+            **{key: plan[key] for key in ("inserts", "updates", "skipped", "conflicts", "preview_rows", "conflict_rows", "skipped_rows", "inactive_match_rows")},
         )
     try:
         backup_result = _backup("pt_claims_before_nust_2026_exclusion_import")
@@ -503,6 +561,7 @@ def import_nust_2026_exclusions(
     ]
     now = _now()
     inserted_count = 0
+    inserted_rows: list[dict[str, Any]] = []
     try:
         with get_runtime_connection() as conn:
             for payload in rows_to_insert:
@@ -525,6 +584,15 @@ def import_nust_2026_exclusions(
                     ),
                 )
                 inserted_count += 1
+                inserted_rows.append(
+                    {
+                        "title": payload["title"],
+                        "start_date": payload["start_date"],
+                        "end_date": payload["end_date"],
+                        "calendar_type": payload["calendar_type"],
+                        "scope_type": payload["scope_type"],
+                    }
+                )
             _commit_if_supported(conn)
     except Exception as exc:
         _log_calendar_diagnostic("nust_import", exc)
@@ -543,15 +611,32 @@ def import_nust_2026_exclusions(
     except Exception as exc:
         _log_calendar_diagnostic("audit", exc)
         warnings.append("Audit logging did not complete, but the NUST exclusions were imported.")
+    refreshed_plan = get_nust_2026_exclusion_import_plan()
+    conflict_count = int(plan["conflicts"])
+    inactive_match_count = int(plan.get("inactive_matches", 0))
+    message = (
+        f"NUST exclusions imported: {inserted_count} inserted, {plan['skipped']} skipped, "
+        f"{conflict_count} conflicts left for review. Regenerate affected documents."
+    )
+    if inactive_match_count:
+        message += f" {inactive_match_count} inactive matching row(s) also need review."
     return _calendar_result(
         True,
         "complete",
-        "NUST exclusions imported. Regenerate affected documents before submission.",
+        message,
         inserts=inserted_count,
+        inserted_count=inserted_count,
         updates=0,
         skipped=plan["skipped"],
-        conflicts=0,
-        preview_rows=get_nust_2026_exclusion_import_plan()["preview_rows"],
+        skipped_count=plan["skipped"],
+        conflicts=conflict_count,
+        conflict_count=conflict_count,
+        inactive_match_count=inactive_match_count,
+        preview_rows=refreshed_plan["preview_rows"],
+        inserted_rows=inserted_rows,
+        skipped_rows=plan["skipped_rows"],
+        conflict_rows=plan["conflict_rows"],
+        inactive_match_rows=plan["inactive_match_rows"],
         backup_result=backup_result,
         warnings=warnings,
     )

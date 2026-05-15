@@ -1891,28 +1891,61 @@ def page_academic_calendar() -> None:
         )
         plan = get_nust_2026_exclusion_import_plan()
         st.write(
-            f"Preview: {plan['inserts']} insert(s), {plan['skipped']} skipped, "
-            f"{plan['conflicts']} conflict(s), {plan.get('inactive_matches', 0)} inactive matching row(s)."
+            f"Preview: {plan['inserts']} insertable row(s), {plan['skipped']} skipped existing row(s), "
+            f"{plan['conflicts']} conflict(s) left for review, {plan.get('inactive_matches', 0)} inactive matching row(s)."
         )
-        st.dataframe(pd.DataFrame(plan["preview_rows"]), width="stretch")
+        st.subheader("Insertable rows")
+        st.dataframe(pd.DataFrame(plan.get("insertable_rows", [])), width="stretch")
+        st.subheader("Skipped existing rows")
+        skipped_rows = pd.DataFrame(plan.get("skipped_rows", []))
+        if skipped_rows.empty:
+            st.info("No matching active exclusions will be skipped.")
+        else:
+            st.dataframe(skipped_rows, width="stretch")
+        st.subheader("Conflicts left for review")
+        conflict_rows = pd.DataFrame(plan.get("conflict_rows", []))
+        if conflict_rows.empty:
+            st.info("No conflicts found.")
+        else:
+            st.dataframe(conflict_rows, width="stretch")
+        st.subheader("Inactive matches")
+        inactive_rows = pd.DataFrame(plan.get("inactive_match_rows", []))
+        if inactive_rows.empty:
+            st.info("No inactive matching exclusions found.")
+        else:
+            st.dataframe(inactive_rows, width="stretch")
         reviewed = st.checkbox("I reviewed the NUST exclusion preview.", key="nust_import_reviewed")
+        allow_non_conflicting = st.checkbox(
+            "Import only non-conflicting NUST exclusions and leave conflicts for later review.",
+            value=bool(plan.get("conflicts") or plan.get("inactive_matches")),
+            key="nust_import_allow_non_conflicting",
+        )
         confirmation = st.text_input(
             f'Type "{NUST_2026_IMPORT_CONFIRMATION}" to confirm',
             key="nust_import_confirmation",
         )
+        can_import = (
+            reviewed
+            and confirmation == NUST_2026_IMPORT_CONFIRMATION
+            and int(plan.get("inserts", 0)) > 0
+            and (not (plan.get("conflicts") or plan.get("inactive_matches")) or allow_non_conflicting)
+        )
         if st.button(
             "Import NUST exclusions",
-            disabled=not (reviewed and confirmation == NUST_2026_IMPORT_CONFIRMATION),
+            disabled=not can_import,
             key="nust_import_button",
         ):
             try:
                 result = import_nust_2026_exclusions(
                     confirm_phrase=confirmation,
                     dry_run=False,
+                    allow_non_conflicting=allow_non_conflicting,
                     user=current_user(),
                 )
                 _show_calendar_write_result(result, result.get("safe_message", "NUST exclusions imported."))
-                st.dataframe(pd.DataFrame(result.get("preview_rows", [])), width="stretch")
+                if result.get("conflict_rows"):
+                    st.subheader("Conflicts left for review")
+                    st.dataframe(pd.DataFrame(result.get("conflict_rows", [])), width="stretch")
             except Exception as exc:
                 show_error("NUST exclusion import failed unexpectedly.", exc)
 

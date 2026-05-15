@@ -263,7 +263,7 @@ def test_nust_2026_import_requires_confirmation_phrase():
     assert result["stage"] == "confirmation"
 
 
-def test_nust_2026_import_conflict_blocks_duplicate_date_scope():
+def test_nust_2026_import_conflict_blocks_without_non_conflicting_option():
     _clear_calendar_db()
     with get_connection() as conn:
         conn.execute(
@@ -281,6 +281,98 @@ def test_nust_2026_import_conflict_blocks_duplicate_date_scope():
     assert result["success"] is False
     assert result["stage"] == "conflict_check"
     assert result["conflicts"] == 1
+    assert result["conflict_rows"][0]["reason"] == "Possible duplicate, review manually."
+
+
+def test_nust_2026_import_with_conflicts_still_inserts_non_conflicting_rows(monkeypatch):
+    _clear_calendar_db()
+    monkeypatch.setattr("app.academic_calendar_service._backup", lambda prefix: {"performed": True, "mode": "sqlite", "safe_message": "backup", "path": "backup.db"})
+    monkeypatch.setattr("app.academic_calendar_service.log_audit_event", lambda *args, **kwargs: None)
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO academic_calendar (
+                title, start_date, end_date, calendar_type, action, allow_override,
+                scope_type, exclude_from_claims_and_registers, active
+            )
+            VALUES ('Different Workers Day Label', '2026-05-01', '2026-05-01', 'public_holiday', 'exclude', 0, 'all', 1, 1)
+            """
+        )
+
+    result = import_nust_2026_exclusions(
+        confirm_phrase="IMPORT NUST EXCLUSIONS",
+        dry_run=False,
+        allow_non_conflicting=True,
+    )
+
+    assert result["success"] is True
+    assert result["inserted_count"] >= 18
+    assert result["conflict_count"] == 1
+    assert result["conflict_rows"][0]["title"] == "Workers' Day"
+    with get_connection() as conn:
+        good_friday = conn.execute("SELECT COUNT(*) AS count FROM academic_calendar WHERE title = 'Good Friday'").fetchone()["count"]
+        easter_monday = conn.execute("SELECT COUNT(*) AS count FROM academic_calendar WHERE title = 'Easter Monday'").fetchone()["count"]
+        conflicted_workers = conn.execute("SELECT COUNT(*) AS count FROM academic_calendar WHERE title = ?", ("Workers' Day",)).fetchone()["count"]
+    assert good_friday == 1
+    assert easter_monday == 1
+    assert conflicted_workers == 0
+
+
+def test_nust_2026_import_with_only_conflicts_blocks_even_when_allowed():
+    _clear_calendar_db()
+    for row in get_nust_2026_exclusion_import_plan()["preview_rows"]:
+        with get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO academic_calendar (
+                    title, start_date, end_date, calendar_type, action, allow_override,
+                    scope_type, exclude_from_claims_and_registers, active
+                )
+                VALUES (?, ?, ?, ?, 'exclude', 0, 'all', 1, 1)
+                """,
+                (f"Conflicting {row['title']}", row["start_date"], row["end_date"], row["calendar_type_slug"]),
+            )
+
+    result = import_nust_2026_exclusions(
+        confirm_phrase="IMPORT NUST EXCLUSIONS",
+        dry_run=False,
+        allow_non_conflicting=True,
+    )
+
+    assert result["success"] is False
+    assert result["stage"] == "nothing_to_import"
+    assert result["conflicts"] >= 19
+
+
+def test_nust_2026_import_reports_inactive_matches_separately(monkeypatch):
+    _clear_calendar_db()
+    monkeypatch.setattr("app.academic_calendar_service._backup", lambda prefix: {"performed": True, "mode": "sqlite", "safe_message": "backup", "path": "backup.db"})
+    monkeypatch.setattr("app.academic_calendar_service.log_audit_event", lambda *args, **kwargs: None)
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO academic_calendar (
+                title, start_date, end_date, calendar_type, action, allow_override,
+                scope_type, exclude_from_claims_and_registers, active
+            )
+            VALUES ('Good Friday', '2026-04-03', '2026-04-03', 'public_holiday', 'exclude', 0, 'all', 1, 0)
+            """
+        )
+
+    plan = get_nust_2026_exclusion_import_plan()
+    result = import_nust_2026_exclusions(
+        confirm_phrase="IMPORT NUST EXCLUSIONS",
+        dry_run=False,
+        allow_non_conflicting=True,
+    )
+
+    assert plan["inactive_match_count"] == 1
+    assert plan["inactive_match_rows"][0]["title"] == "Good Friday"
+    assert result["success"] is True
+    assert result["inactive_match_count"] == 1
+    with get_connection() as conn:
+        active_good_friday = conn.execute("SELECT COUNT(*) AS count FROM academic_calendar WHERE title = 'Good Friday' AND active = 1").fetchone()["count"]
+    assert active_good_friday == 0
 
 
 def test_nust_2026_import_uses_provider_connection_in_postgresql_mode(monkeypatch):
