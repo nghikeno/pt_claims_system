@@ -68,6 +68,12 @@ def get_excluded_dates(year: int, month: int) -> set[date]:
     return excluded
 
 
+def _calendar_exclusion_label(row: dict) -> str:
+    title = str(row.get("title") or "Academic calendar exclusion")
+    calendar_type = str(row.get("calendar_type") or "").replace("_", " ").title()
+    return f"{title} ({calendar_type})" if calendar_type else title
+
+
 def resolve_lecturer_id(lecturer_identifier: int) -> int:
     with get_runtime_connection() as conn:
         by_id = conn.execute(
@@ -147,6 +153,9 @@ def generate_monthly_sessions(lecturer_id: int, year: int, month: int) -> pd.Dat
         "physical_address",
         "contact_number",
         "course_code",
+        "lecturer_id",
+        "course_id",
+        "group_id",
         "course_name",
         "faculty",
         "department",
@@ -169,12 +178,14 @@ def generate_monthly_sessions(lecturer_id: int, year: int, month: int) -> pd.Dat
         empty_df.attrs["claim_period_start"] = period_start.isoformat()
         empty_df.attrs["claim_period_end"] = period_end.isoformat()
         empty_df.attrs["claim_period_label"] = claim_period.label
+        empty_df.attrs["applied_calendar_exclusions"] = []
+        empty_df.attrs["excluded_session_details"] = []
         return empty_df
 
     sessions = []
+    applied_exclusions: dict[int | str, dict] = {}
+    excluded_session_details: list[dict] = []
     for session_date in dates_between(generation_start, generation_end):
-        if session_date in excluded_dates:
-            continue
         day_name = session_date.strftime("%A")
         for entry in timetable_entries:
             if entry["day_of_week"] != day_name:
@@ -189,7 +200,42 @@ def generate_monthly_sessions(lecturer_id: int, year: int, month: int) -> pd.Dat
                 "course_id": entry["course_id"],
                 "group_id": entry["group_id"],
             }
-            if any(calendar_exclusion_applies(row, session_scope) for row in calendar_exclusions):
+            applied = [row for row in calendar_exclusions if calendar_exclusion_applies(row, session_scope)]
+            if session_date in excluded_dates and not applied:
+                excluded_session_details.append(
+                    {
+                        "session_date": session_date.isoformat(),
+                        "course_code": entry["course_code"],
+                        "group_name": entry["group_name"],
+                        "start_time": entry["start_time"],
+                        "end_time": entry["end_time"],
+                        "reason": "Sunday or full-day all-scope exclusion",
+                    }
+                )
+                continue
+            if applied:
+                for exclusion in applied:
+                    exclusion_key = exclusion.get("id") or exclusion.get("calendar_id") or _calendar_exclusion_label(exclusion)
+                    applied_exclusions[exclusion_key] = {
+                        "id": exclusion.get("id") or exclusion.get("calendar_id"),
+                        "title": exclusion.get("title"),
+                        "calendar_type": exclusion.get("calendar_type"),
+                        "start_date": exclusion.get("start_date"),
+                        "end_date": exclusion.get("end_date"),
+                        "start_time": exclusion.get("start_time"),
+                        "end_time": exclusion.get("end_time"),
+                        "scope_type": exclusion.get("scope_type"),
+                    }
+                    excluded_session_details.append(
+                        {
+                            "session_date": session_date.isoformat(),
+                            "course_code": entry["course_code"],
+                            "group_name": entry["group_name"],
+                            "start_time": entry["start_time"],
+                            "end_time": entry["end_time"],
+                            "reason": _calendar_exclusion_label(exclusion),
+                        }
+                    )
                 continue
             hours = calculate_hours(entry["start_time"], entry["end_time"])
             tariff = float(lecturer["tariff_per_hour"])
@@ -205,6 +251,9 @@ def generate_monthly_sessions(lecturer_id: int, year: int, month: int) -> pd.Dat
                     "physical_address": lecturer["physical_address"],
                     "contact_number": lecturer["contact_number"],
                     "course_code": entry["course_code"],
+                    "lecturer_id": entry["lecturer_id"],
+                    "course_id": entry["course_id"],
+                    "group_id": entry["group_id"],
                     "course_name": entry["course_name"],
                     "faculty": entry["faculty"],
                     "department": entry["department"],
@@ -229,6 +278,8 @@ def generate_monthly_sessions(lecturer_id: int, year: int, month: int) -> pd.Dat
     sessions_df.attrs["claim_period_start"] = period_start.isoformat()
     sessions_df.attrs["claim_period_end"] = period_end.isoformat()
     sessions_df.attrs["claim_period_label"] = claim_period.label
+    sessions_df.attrs["applied_calendar_exclusions"] = list(applied_exclusions.values())
+    sessions_df.attrs["excluded_session_details"] = excluded_session_details
     return sessions_df
 
 

@@ -191,3 +191,38 @@ def test_session_generation_uses_custom_may_claim_period():
 
     assert "2026-04-30" in dates
     assert all(date <= "2026-05-29" for date in dates)
+
+
+def test_academic_recess_in_may_custom_period_reduces_sessions_and_records_applied_exclusion():
+    _reset_minimal_session_data()
+    with get_connection() as conn:
+        conn.execute("DELETE FROM timetable_entries")
+        conn.execute(
+            """
+            INSERT INTO timetable_entries (
+                lecturer_id, group_id, day_of_week, start_time, end_time,
+                effective_start_date, effective_end_date, active
+            )
+            VALUES (101, 301, 'Tuesday', '10:00', '11:00', '2026-05-01', '2026-05-31', 1)
+            """
+        )
+    baseline = generate_monthly_sessions(900101, 2026, 5)
+    _insert_calendar(
+        title="Institutional Recess",
+        calendar_type="academic_recess",
+        start_date="2026-05-26",
+        end_date="2026-05-27",
+        scope_type="all",
+        start_time=None,
+        end_time=None,
+    )
+
+    filtered = generate_monthly_sessions(900101, 2026, 5)
+    filtered_dates = set(filtered["session_date"])
+
+    assert "2026-05-26" in set(baseline["session_date"])
+    assert "2026-05-26" not in filtered_dates
+    assert len(filtered) == len(baseline) - 1
+    assert float(filtered["hours"].sum()) == float(baseline["hours"].sum()) - 1.0
+    assert filtered.attrs["applied_calendar_exclusions"][0]["title"] == "Institutional Recess"
+    assert any(detail["session_date"] == "2026-05-26" for detail in filtered.attrs["excluded_session_details"])

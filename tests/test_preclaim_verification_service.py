@@ -177,3 +177,39 @@ def test_export_preclaim_report_excludes_sensitive_fields(tmp_path):
     assert "SECRET-ID" not in text
     assert "SECRET-PAYE" not in text
     assert "password_hash" not in text
+
+
+def test_preclaim_reports_applied_calendar_exclusions_and_suspicious_enrolments():
+    _reset_preclaim_db()
+    with get_connection() as conn:
+        conn.execute("DELETE FROM timetable_entries")
+        conn.execute(
+            """
+            INSERT INTO timetable_entries (
+                lecturer_id, group_id, day_of_week, start_time, end_time,
+                effective_start_date, effective_end_date, active
+            )
+            VALUES (1, 1, 'Tuesday', '10:00', '11:00', '2026-05-01', '2026-05-31', 1)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO academic_calendar (
+                title, start_date, end_date, calendar_type, action, allow_override,
+                scope_type, exclude_from_claims_and_registers, active
+            )
+            VALUES ('Institutional Recess', '2026-05-26', '2026-05-27', 'academic_recess', 'exclude', 0, 'all', 1, 1)
+            """
+        )
+        conn.execute(
+            "INSERT INTO students (id, student_number, surname, initials, full_name, active) VALUES (2, '18402000', 'STUDENT SURNAME & INIT...', 'TIME:', 'STUDENT SURNAME & INIT... TIME:', 1)"
+        )
+        conn.execute("INSERT INTO group_enrolments (student_id, group_id, active) VALUES (2, 1, 1)")
+
+    result = build_preclaim_verification("900001", 2026, 5)
+
+    assert "One or more enrolments look like imported header rows." in result["warnings"]
+    assert result["summary"]["applied_calendar_exclusion_count"] == 1
+    assert "2026-05-26" in set(result["tables"]["excluded_session_details"]["session_date"])
+    assert result["tables"]["applied_calendar_exclusions"].iloc[0]["title"] == "Institutional Recess"
+    assert result["tables"]["suspicious_enrolments"].iloc[0]["student_number"] == "18402000"

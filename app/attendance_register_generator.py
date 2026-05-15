@@ -19,6 +19,7 @@ from app.docx_utils import (
     set_cell_text,
     set_narrow_margins,
 )
+from app.student_row_safety import is_suspicious_student_row
 
 
 WARNING_TEXT = "DRAFT ONLY - CLASHES DETECTED, REVIEW REQUIRED"
@@ -50,7 +51,7 @@ def get_students_for_group(group_name: str, course_code: str, staff_number: str 
             """),
             tuple(params),
         ).fetchall()
-    return rows_to_dicts(rows)
+    return [row for row in rows_to_dicts(rows) if not is_suspicious_student_row(row)]
 
 
 def _student_rows(students: list[dict], session_count: int) -> list[list[str]]:

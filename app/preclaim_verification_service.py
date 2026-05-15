@@ -13,6 +13,7 @@ from app.config import EXPORTS_DIR, database_provider
 from app.database import init_db
 from app.db_provider import convert_placeholders, get_runtime_connection, row_to_dict, rows_to_dicts
 from app.session_generator import generate_monthly_sessions
+from app.student_row_safety import suspicious_student_row_reason
 from app.validators import detect_clashes, parse_date
 
 
@@ -96,6 +97,40 @@ def _fetch_active_timetable(staff_number: str) -> pd.DataFrame:
     return pd.DataFrame(rows_to_dicts(rows))
 
 
+def _fetch_suspicious_enrolments(staff_number: str) -> pd.DataFrame:
+    if database_provider() == "sqlite":
+        init_db()
+    with get_runtime_connection() as conn:
+        rows = conn.execute(
+            convert_placeholders("""
+            SELECT s.student_number, s.surname, s.initials, s.full_name,
+                   g.group_name, c.course_code
+            FROM group_enrolments AS ge
+            JOIN students AS s ON s.id = ge.student_id
+            JOIN student_groups AS g ON g.id = ge.group_id
+            JOIN lecturers AS l ON l.id = g.lecturer_id
+            JOIN courses AS c ON c.id = g.course_id
+            WHERE l.staff_number = ? AND ge.active = 1 AND s.active = 1
+            ORDER BY c.course_code, g.group_name, s.surname, s.initials, s.student_number
+            """),
+            (str(staff_number),),
+        ).fetchall()
+    suspicious = []
+    for row in rows_to_dicts(rows):
+        reason = suspicious_student_row_reason(
+            row.get("student_number"),
+            row.get("surname"),
+            row.get("initials"),
+            row.get("full_name"),
+            " ".join(str(row.get(key) or "") for key in ("surname", "initials", "full_name", "student_number")),
+        )
+        if reason:
+            item = dict(row)
+            item["reason"] = reason
+            suspicious.append(item)
+    return pd.DataFrame(suspicious)
+
+
 def _expected_calendar_items(year: int, month: int) -> list[dict[str, str]]:
     claim_period = resolve_claim_period(int(year), int(month))
     month_start, month_end = claim_period.start_date, claim_period.end_date
@@ -165,6 +200,7 @@ def build_preclaim_verification(staff_number: str, year: int, month: int) -> dic
 
     groups_df = _fetch_active_groups(staff_number)
     timetable_df = _fetch_active_timetable(staff_number)
+    suspicious_enrolments_df = _fetch_suspicious_enrolments(staff_number)
     if groups_df.empty:
         blockers.append("No active lecturer-scoped groups exist for this lecturer.")
     if timetable_df.empty:
@@ -177,6 +213,8 @@ def build_preclaim_verification(staff_number: str, year: int, month: int) -> dic
         zero_group_ids = set(zero_enrolment_groups["group_id"].astype(int))
         if any(int(group_id) in zero_group_ids for group_id in timetable_df["group_id"]):
             warnings.append("Timetable entries exist for groups with zero active enrolments.")
+    if not suspicious_enrolments_df.empty:
+        warnings.append("One or more enrolments look like imported header rows.")
 
     calendar_df = _calendar_exclusions_df(year, month)
     expected_calendar_items = _expected_calendar_items(year, month)
@@ -220,6 +258,8 @@ def build_preclaim_verification(staff_number: str, year: int, month: int) -> dic
 
     status = "BLOCK" if blockers else "WARN" if warnings else "PASS"
     excluded_dates_count = int(sessions_df.attrs.get("excluded_dates_count", 0)) if hasattr(sessions_df, "attrs") else 0
+    applied_exclusions = sessions_df.attrs.get("applied_calendar_exclusions", []) if hasattr(sessions_df, "attrs") else []
+    excluded_session_details = sessions_df.attrs.get("excluded_session_details", []) if hasattr(sessions_df, "attrs") else []
     summary = {
         "lecturer_name": lecturer["full_name"],
         "staff_number": lecturer["staff_number"],
@@ -240,6 +280,7 @@ def build_preclaim_verification(staff_number: str, year: int, month: int) -> dic
         "active_timetable_entry_count": int(len(timetable_df)),
         "calendar_exclusion_count": int(len(calendar_df)),
         "excluded_dates_count": excluded_dates_count,
+        "applied_calendar_exclusion_count": len(applied_exclusions),
         "total_claimable_sessions": total_sessions,
         "total_claimable_hours": round(total_hours, 2),
         "estimated_claim_amount": round(total_amount, 2),
@@ -253,11 +294,14 @@ def build_preclaim_verification(staff_number: str, year: int, month: int) -> dic
             "groups": groups_df,
             "timetable": timetable_df,
             "calendar_exclusions": calendar_df,
+            "applied_calendar_exclusions": pd.DataFrame(applied_exclusions),
+            "excluded_session_details": pd.DataFrame(excluded_session_details),
             "generated_sessions": sessions_df,
             "clashes": clashes_df,
             "totals_by_course": _totals_by(sessions_df, ["course_code", "course_name"]),
             "totals_by_group": _totals_by(sessions_df, ["course_code", "course_name", "group_name"]),
             "zero_enrolment_groups": zero_enrolment_groups.copy() if not zero_enrolment_groups.empty else _empty_df(list(groups_df.columns)),
+            "suspicious_enrolments": suspicious_enrolments_df,
             "expected_calendar_items": pd.DataFrame(expected_calendar_items),
         },
     }

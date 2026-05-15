@@ -7,6 +7,8 @@ from typing import BinaryIO, Iterable
 
 from docx import Document
 
+from app.student_row_safety import is_time_range_text, suspicious_student_row_reason
+
 
 BANK_PATTERNS = (
     "bank",
@@ -81,11 +83,14 @@ def _extract_header_from_cells(cells: list[str], header: dict[str, str]) -> None
 
 def _student_number_from_cells(cells: list[str]) -> tuple[int | None, str]:
     candidates: list[tuple[int, str]] = []
+    row_text = " ".join(cells)
     for index, cell in enumerate(cells):
         if re.fullmatch(r"\d{1,2}[-/]\d{1,2}[-/]\d{2,4}", clean_text(cell)):
             continue
+        if is_time_range_text(cell):
+            continue
         compact = re.sub(r"\D", "", cell)
-        if len(compact) >= 7:
+        if len(compact) >= 7 and suspicious_student_row_reason(compact, row_text=row_text) is None:
             candidates.append((index, compact))
     if candidates:
         return candidates[0]
@@ -113,7 +118,8 @@ def _split_name_cell(value: str) -> tuple[str, str]:
 
 def _looks_like_student_row(cells: list[str]) -> bool:
     joined = " ".join(cells).casefold()
-    if any(marker in joined for marker in ("signature", "name of lecturer", "staff nr", "date")):
+    reason = suspicious_student_row_reason(row_text=" ".join(cells))
+    if reason is not None:
         return False
     _index, student_number = _student_number_from_cells(cells)
     return bool(student_number)
@@ -139,12 +145,21 @@ def _extract_student_from_row(cells: list[str]) -> dict[str, str] | None:
         surname, initials = _split_name_cell(before_number[0])
 
     if surname and not _is_row_number(surname):
-        return {
+        student = {
             "student_number": student_number,
             "surname": surname,
             "initials": initials,
             "full_name": " ".join(part for part in (surname, initials) if part),
         }
+        if suspicious_student_row_reason(
+            student["student_number"],
+            student["surname"],
+            student["initials"],
+            student["full_name"],
+            " ".join(cells),
+        ):
+            return None
+        return student
 
     candidates = [cell for index, cell in enumerate(cells) if index != number_index and cell]
     if candidates and _is_row_number(candidates[0]):
@@ -162,12 +177,21 @@ def _extract_student_from_row(cells: list[str]) -> dict[str, str] | None:
 
     if not surname:
         return None
-    return {
+    student = {
         "student_number": student_number,
         "surname": surname,
         "initials": initials,
         "full_name": " ".join(part for part in (surname, initials) if part),
     }
+    if suspicious_student_row_reason(
+        student["student_number"],
+        student["surname"],
+        student["initials"],
+        student["full_name"],
+        " ".join(cells),
+    ):
+        return None
+    return student
 
 
 def parse_attendance_docx(path_or_file: str | Path | BinaryIO, source_name: str | None = None) -> ParsedAttendanceSheet:
@@ -189,6 +213,11 @@ def parse_attendance_docx(path_or_file: str | Path | BinaryIO, source_name: str 
             parsed.warnings.append("Bank details detected and ignored.")
             continue
         _extract_header_from_cells(cells, parsed.header)
+        suspicious_reason = suspicious_student_row_reason(row_text=row_text)
+        if suspicious_reason:
+            if any(cell for cell in cells):
+                parsed.skipped_rows.append({"row_text": row_text, "reason": suspicious_reason})
+            continue
         student = _extract_student_from_row(cells)
         if student is None:
             if any(cell for cell in cells) and not any(

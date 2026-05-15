@@ -156,6 +156,32 @@ def test_validation_rejects_bank_related_text():
     assert "Bank details must not be imported." in errors
 
 
+def test_validation_skips_header_time_contaminant_rows():
+    setup_student_dependencies()
+    group_id = group_id_for("LONIA_GROUP2_FT_SEM1_2026")
+    parsed = parsed_sheet()
+    parsed.students.append(
+        {
+            "student_number": "18402000",
+            "surname": "STUDENT SURNAME & INIT...",
+            "initials": "TIME:",
+            "full_name": "STUDENT SURNAME & INIT... TIME:",
+        }
+    )
+
+    is_valid, errors, _warnings, skipped = validate_student_import(
+        parsed,
+        "300001",
+        "TST999S",
+        group_id,
+        confirm_group_mapping=True,
+    )
+
+    assert is_valid is True
+    assert errors == []
+    assert any(row["reason"] in {"Header row", "Time row", "Invalid student number"} for row in skipped)
+
+
 def test_import_inserts_students_and_group_enrolments_and_backup():
     setup_student_dependencies()
     group_id = group_id_for("LONIA_GROUP2_FT_SEM1_2026")

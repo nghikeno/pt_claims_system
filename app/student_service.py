@@ -8,9 +8,10 @@ import csv
 import pandas as pd
 
 from app.backup_database import backup_database
-from app.config import EXPORTS_DIR
-from app.database import get_connection, init_db
-from app.db_provider import convert_placeholders, get_runtime_connection, init_runtime_db, rows_to_dicts
+from app.config import EXPORTS_DIR, database_provider
+from app.database import init_db
+from app.db_provider import convert_placeholders, get_runtime_connection, init_runtime_db, row_to_dict, rows_to_dicts
+from app.student_row_safety import suspicious_student_row_reason
 from app.student_word_import import BANK_PATTERNS, ParsedAttendanceSheet, clean_text
 
 
@@ -30,11 +31,38 @@ def _bank_text_found(values: list[str]) -> bool:
     return any(pattern in text for pattern in BANK_PATTERNS)
 
 
+def _ensure_sqlite_schema() -> None:
+    if database_provider() == "sqlite":
+        init_db()
+
+
+def _backup_if_sqlite(prefix: str) -> dict[str, Any]:
+    provider = database_provider()
+    if provider != "sqlite":
+        return {
+            "performed": False,
+            "mode": provider,
+            "safe_message": "Production PostgreSQL mode: local SQLite backup skipped; provider backup/audit applies.",
+            "path": None,
+        }
+    return {
+        "performed": True,
+        "mode": provider,
+        "safe_message": "Local SQLite backup created before student write.",
+        "path": backup_database(prefix=prefix),
+    }
+
+
+def _commit(conn: Any) -> None:
+    if hasattr(conn, "commit"):
+        conn.commit()
+
+
 def get_group_for_student_upload(staff_number: str, course_code: str, group_id: int) -> dict | None:
-    init_db()
-    with get_connection() as conn:
+    _ensure_sqlite_schema()
+    with get_runtime_connection() as conn:
         row = conn.execute(
-            """
+            convert_placeholders("""
             SELECT g.id AS group_id, g.group_name, g.lecturer_id, g.course_id, g.campus, g.study_mode,
                    l.staff_number, l.full_name AS lecturer_name,
                    c.course_code, c.course_name
@@ -42,10 +70,10 @@ def get_group_for_student_upload(staff_number: str, course_code: str, group_id: 
             JOIN lecturers AS l ON l.id = g.lecturer_id
             JOIN courses AS c ON c.id = g.course_id
             WHERE l.staff_number = ? AND c.course_code = ? AND g.id = ? AND g.lecturer_id IS NOT NULL
-            """,
+            """),
             (_clean(staff_number).replace(" ", ""), _clean(course_code).upper().replace(" ", ""), int(group_id)),
         ).fetchone()
-    return dict(row) if row else None
+    return row_to_dict(row)
 
 
 def list_student_enrolments(
@@ -137,6 +165,11 @@ def validate_student_import(
         if not student_number:
             skipped.append({"row_text": str(student), "reason": "Student number is blank."})
             continue
+        row_text = " ".join([student_number, surname, initials, full_name])
+        suspicious_reason = suspicious_student_row_reason(student_number, surname, initials, full_name, row_text)
+        if suspicious_reason:
+            skipped.append({"row_text": str(student), "reason": suspicious_reason})
+            continue
         if not surname:
             skipped.append({"row_text": str(student), "reason": "Surname is blank."})
             continue
@@ -158,15 +191,16 @@ def validate_student_import(
         errors.append("No valid student rows were found.")
 
     if valid_students:
-        with get_connection() as conn:
+        with get_runtime_connection() as conn:
             for student in valid_students:
                 existing = conn.execute(
-                    "SELECT surname, initials, full_name FROM students WHERE student_number = ?",
+                    convert_placeholders("SELECT surname, initials, full_name FROM students WHERE student_number = ?"),
                     (student["student_number"],),
                 ).fetchone()
-                if existing and (
-                    _clean(existing["surname"]) != student["surname"]
-                    or _clean(existing["initials"]) != student["initials"]
+                existing_row = row_to_dict(existing)
+                if existing_row and (
+                    _clean(existing_row["surname"]) != student["surname"]
+                    or _clean(existing_row["initials"]) != student["initials"]
                 ):
                     message = f"Student {student['student_number']} already exists with different name details."
                     if allow_student_updates:
@@ -178,8 +212,9 @@ def validate_student_import(
 
 
 def _student_id(conn, student_number: str) -> int | None:
-    row = conn.execute("SELECT id FROM students WHERE student_number = ?", (student_number,)).fetchone()
-    return int(row["id"]) if row else None
+    row = conn.execute(convert_placeholders("SELECT id FROM students WHERE student_number = ?"), (student_number,)).fetchone()
+    row_dict = row_to_dict(row)
+    return int(row_dict["id"]) if row_dict else None
 
 
 def import_students_for_group(
@@ -202,7 +237,7 @@ def import_students_for_group(
         raise ValueError("; ".join(errors))
 
     group = get_group_for_student_upload(staff_number, course_code, group_id)
-    backup_database(prefix="pt_claims_before_student_import")
+    backup_result = _backup_if_sqlite(prefix="pt_claims_before_student_import")
     summary = {
         "file_name": parsed.source_name,
         "target_lecturer": f"{group['staff_number']} - {group['lecturer_name']}",
@@ -218,7 +253,7 @@ def import_students_for_group(
         "rows_skipped": len(skipped),
         "validation_warnings": warnings,
     }
-    with get_connection() as conn:
+    with get_runtime_connection() as conn:
         conn.execute("BEGIN")
         try:
             for student in parsed.students:
@@ -226,51 +261,60 @@ def import_students_for_group(
                 surname = _clean(student.get("surname"))
                 initials = _clean(student.get("initials"))
                 full_name = _clean(student.get("full_name"))
+                row_text = " ".join([student_number, surname, initials, full_name])
+                if suspicious_student_row_reason(student_number, surname, initials, full_name, row_text):
+                    continue
                 if not student_number or not surname or (not initials and not full_name):
                     continue
                 summary["rows_valid"] += 1
                 student_id = _student_id(conn, student_number)
                 if student_id is None:
-                    cursor = conn.execute(
-                        "INSERT INTO students (student_number, surname, initials, full_name, active) VALUES (?, ?, ?, ?, 1)",
-                        (student_number, surname, initials, full_name),
-                    )
-                    student_id = int(cursor.lastrowid)
+                    insert_sql = "INSERT INTO students (student_number, surname, initials, full_name, active) VALUES (?, ?, ?, ?, 1)"
+                    if database_provider() != "sqlite":
+                        insert_sql += " RETURNING id"
+                    cursor = conn.execute(convert_placeholders(insert_sql), (student_number, surname, initials, full_name))
+                    if database_provider() == "sqlite":
+                        student_id = int(cursor.lastrowid)
+                    else:
+                        student_id = int(row_to_dict(cursor.fetchone())["id"])
                     summary["students_inserted"] += 1
                 else:
                     existing = conn.execute(
-                        "SELECT surname, initials, full_name FROM students WHERE id = ?",
+                        convert_placeholders("SELECT surname, initials, full_name FROM students WHERE id = ?"),
                         (student_id,),
                     ).fetchone()
+                    existing_row = row_to_dict(existing) or {}
                     if (
-                        _clean(existing["surname"]) != surname
-                        or _clean(existing["initials"]) != initials
-                        or _clean(existing["full_name"]) != full_name
+                        _clean(existing_row["surname"]) != surname
+                        or _clean(existing_row["initials"]) != initials
+                        or _clean(existing_row["full_name"]) != full_name
                     ):
                         conn.execute(
-                            "UPDATE students SET surname = ?, initials = ?, full_name = ?, active = 1 WHERE id = ?",
+                            convert_placeholders("UPDATE students SET surname = ?, initials = ?, full_name = ?, active = 1 WHERE id = ?"),
                             (surname, initials, full_name, student_id),
                         )
                         summary["students_updated"] += 1
                 enrolment = conn.execute(
-                    "SELECT id, active FROM group_enrolments WHERE student_id = ? AND group_id = ?",
+                    convert_placeholders("SELECT id, active FROM group_enrolments WHERE student_id = ? AND group_id = ?"),
                     (student_id, int(group_id)),
                 ).fetchone()
-                if enrolment is None:
+                enrolment_row = row_to_dict(enrolment)
+                if enrolment_row is None:
                     conn.execute(
-                        "INSERT INTO group_enrolments (student_id, group_id, active) VALUES (?, ?, 1)",
+                        convert_placeholders("INSERT INTO group_enrolments (student_id, group_id, active) VALUES (?, ?, 1)"),
                         (student_id, int(group_id)),
                     )
                     summary["enrolments_inserted"] += 1
-                elif int(enrolment["active"]) == 0:
-                    conn.execute("UPDATE group_enrolments SET active = 1 WHERE id = ?", (int(enrolment["id"]),))
+                elif int(enrolment_row["active"]) == 0:
+                    conn.execute(convert_placeholders("UPDATE group_enrolments SET active = 1 WHERE id = ?"), (int(enrolment_row["id"]),))
                     summary["enrolments_reactivated"] += 1
                 else:
                     summary["enrolments_already_existing"] += 1
-            conn.commit()
+            _commit(conn)
         except Exception:
             conn.rollback()
             raise
+    summary["backup"] = backup_result
     return summary
 
 
@@ -302,18 +346,20 @@ def import_student_template_file(path: str | Path, allow_student_updates: bool =
 
     summaries: list[dict[str, Any]] = []
     for (staff_number, course_code, group_name), group_df in df.groupby(["staff_number", "course_code", "group_name"], sort=True):
-        with get_connection() as conn:
+        _ensure_sqlite_schema()
+        with get_runtime_connection() as conn:
             row = conn.execute(
-                """
+                convert_placeholders("""
                 SELECT g.id
                 FROM student_groups AS g
                 JOIN lecturers AS l ON l.id = g.lecturer_id
                 JOIN courses AS c ON c.id = g.course_id
                 WHERE l.staff_number = ? AND c.course_code = ? AND g.group_name = ? AND g.lecturer_id IS NOT NULL
-                """,
+                """),
                 (_clean(staff_number).replace(" ", ""), _clean(course_code).upper().replace(" ", ""), _clean(group_name)),
             ).fetchone()
-        if row is None:
+        row_dict = row_to_dict(row)
+        if row_dict is None:
             raise ValueError(f"No lecturer-scoped group found for {staff_number} / {course_code} / {group_name}.")
         parsed = ParsedAttendanceSheet(
             source_name=source.name,
@@ -334,7 +380,7 @@ def import_student_template_file(path: str | Path, allow_student_updates: bool =
                 parsed,
                 _clean(staff_number),
                 _clean(course_code),
-                int(row["id"]),
+                int(row_dict["id"]),
                 confirm_group_mapping=True,
                 allow_student_updates=allow_student_updates,
             )
@@ -344,17 +390,19 @@ def import_student_template_file(path: str | Path, allow_student_updates: bool =
 
 def deactivate_enrolment(enrolment_id: int) -> dict:
     get_enrolment(enrolment_id)
-    backup_database(prefix="pt_claims_before_student_enrolment_update")
-    with get_connection() as conn:
-        conn.execute("UPDATE group_enrolments SET active = 0 WHERE id = ?", (int(enrolment_id),))
+    _backup_if_sqlite(prefix="pt_claims_before_student_enrolment_update")
+    with get_runtime_connection() as conn:
+        conn.execute(convert_placeholders("UPDATE group_enrolments SET active = 0 WHERE id = ?"), (int(enrolment_id),))
+        _commit(conn)
     return get_enrolment(enrolment_id)
 
 
 def reactivate_enrolment(enrolment_id: int) -> dict:
     get_enrolment(enrolment_id)
-    backup_database(prefix="pt_claims_before_student_enrolment_update")
-    with get_connection() as conn:
-        conn.execute("UPDATE group_enrolments SET active = 1 WHERE id = ?", (int(enrolment_id),))
+    _backup_if_sqlite(prefix="pt_claims_before_student_enrolment_update")
+    with get_runtime_connection() as conn:
+        conn.execute(convert_placeholders("UPDATE group_enrolments SET active = 1 WHERE id = ?"), (int(enrolment_id),))
+        _commit(conn)
     return get_enrolment(enrolment_id)
 
 

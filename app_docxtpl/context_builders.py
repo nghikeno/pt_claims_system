@@ -7,6 +7,7 @@ import pandas as pd
 
 from app.attendance_register_generator import get_students_for_group
 from app.docx_utils import format_time_range
+from app.student_row_safety import is_suspicious_student_row
 
 
 MAX_REGISTER_SESSIONS = 5
@@ -124,7 +125,8 @@ def _student_rows(group_name: str, course_code: str, staff_number: str | None = 
             for _ in range(10)
         ]
     rows = []
-    for index, student in enumerate(students, start=1):
+    safe_students = [student for student in students if not is_suspicious_student_row(student)]
+    for index, student in enumerate(safe_students, start=1):
         row = {
             "nr": str(index),
             "surname": str(student.get("surname") or ""),

@@ -65,6 +65,28 @@ def make_split_column_attendance_docx(path: Path) -> Path:
     return path
 
 
+def make_header_time_contaminated_docx(path: Path) -> Path:
+    doc = Document()
+    doc.add_paragraph("CLASS ATTENDANCE SHEET")
+    table = doc.add_table(rows=5, cols=4)
+    table.rows[0].cells[0].text = "NR."
+    table.rows[0].cells[1].text = "STUDENT SURNAME & INITIAL"
+    table.rows[0].cells[2].text = "STD NR"
+    table.rows[0].cells[3].text = "TIME: 18:40-20:00"
+    table.rows[1].cells[0].text = "29"
+    table.rows[1].cells[1].text = "STUDENT SURNAME & INIT..."
+    table.rows[1].cells[2].text = "TIME:"
+    table.rows[1].cells[3].text = "18:40-20:00"
+    table.rows[2].cells[0].text = "1"
+    table.rows[2].cells[1].text = "Haukongo"
+    table.rows[2].cells[2].text = "JL"
+    table.rows[2].cells[3].text = "226173453"
+    table.rows[3].cells[0].text = "SIGNATURE"
+    table.rows[4].cells[0].text = "DATE"
+    doc.save(path)
+    return path
+
+
 def test_word_parser_extracts_header_and_students(tmp_path):
     path = make_sample_attendance_docx(tmp_path / "attendance.docx")
 
@@ -119,3 +141,14 @@ def test_word_parser_detects_bank_text_but_does_not_extract_bank_rows(tmp_path):
     parsed = parse_attendance_docx(path)
 
     assert "Bank details detected and ignored." in parsed.warnings
+
+
+def test_word_parser_rejects_header_time_rows_and_time_derived_numbers(tmp_path):
+    path = make_header_time_contaminated_docx(tmp_path / "contaminated.docx")
+
+    parsed = parse_attendance_docx(path)
+
+    assert [student["student_number"] for student in parsed.students] == ["226173453"]
+    assert all(student["surname"] != "STUDENT SURNAME & INIT..." for student in parsed.students)
+    assert any(row["reason"] in {"Header row", "Time row"} for row in parsed.skipped_rows)
+    assert any("18:40-20:00" in row["row_text"] for row in parsed.skipped_rows)

@@ -349,7 +349,7 @@ def create_calendar_entry_result(data: dict[str, Any], user: dict | None = None)
         _log_calendar_diagnostic("calendar_insert", exc)
         return _calendar_result(False, "calendar_insert", "Calendar exclusion could not be saved during calendar insert.")
 
-    warnings: list[str] = []
+    warnings: list[str] = ["Previously generated documents for affected periods should be regenerated after calendar changes."]
     audit_warning = _audit_calendar_event("calendar_add", entry_id, payload["title"], user=user)
     if audit_warning:
         warnings.append(audit_warning)
@@ -405,7 +405,7 @@ def update_calendar_entry_result(entry_id: int, data: dict[str, Any], user: dict
     except Exception as exc:
         _log_calendar_diagnostic("calendar_update", exc)
         return _calendar_result(False, "calendar_update", "Calendar exclusion could not be updated during calendar update.", entry_id=int(entry_id))
-    warnings: list[str] = []
+    warnings: list[str] = ["Previously generated documents for affected periods should be regenerated after calendar changes."]
     audit_warning = _audit_calendar_event("calendar_update", int(entry_id), payload["title"], user=user)
     if audit_warning:
         warnings.append(audit_warning)
@@ -446,7 +446,7 @@ def set_calendar_entry_active_result(entry_id: int, active: bool, user: dict | N
         _log_calendar_diagnostic("calendar_status_update", exc)
         return _calendar_result(False, "calendar_status_update", "Calendar exclusion status could not be changed during calendar update.", entry_id=int(entry_id))
     action = "calendar_reactivate" if active else "calendar_deactivate"
-    warnings: list[str] = []
+    warnings: list[str] = ["Previously generated documents for affected periods should be regenerated after calendar changes."]
     audit_warning = _audit_calendar_event(action, int(entry_id), str(current.get("title") or ""), user=user)
     if audit_warning:
         warnings.append(audit_warning)

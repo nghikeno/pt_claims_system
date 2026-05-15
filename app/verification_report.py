@@ -6,7 +6,8 @@ import pandas as pd
 
 from app.db_provider import convert_placeholders, get_runtime_connection, rows_to_dicts
 from app.docx_utils import ensure_parent, format_month_year
-from app.session_generator import dates_between, month_bounds
+from app.claim_period_service import resolve_claim_period
+from app.session_generator import dates_between
 
 
 CHECK_ITEMS = [
@@ -24,7 +25,8 @@ CHECK_ITEMS = [
 
 
 def get_excluded_date_details(year: int, month: int) -> pd.DataFrame:
-    month_start, month_end = month_bounds(year, month)
+    claim_period = resolve_claim_period(int(year), int(month))
+    month_start, month_end = claim_period.start_date, claim_period.end_date
     rows = []
     for current_date in dates_between(month_start, month_end):
         if current_date.weekday() == 6:
@@ -36,6 +38,8 @@ def get_excluded_date_details(year: int, month: int) -> pd.DataFrame:
             SELECT title, start_date, end_date, calendar_type
             FROM academic_calendar
             WHERE lower(action) = 'exclude'
+              AND COALESCE(active, 1) = 1
+              AND COALESCE(exclude_from_claims_and_registers, 1) = 1
               AND date(start_date) <= date(?)
               AND date(end_date) >= date(?)
             """),

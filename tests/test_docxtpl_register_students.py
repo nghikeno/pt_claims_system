@@ -61,12 +61,21 @@ def setup_register_student_data():
         )
         inactive_student_id = conn.execute("SELECT id FROM students WHERE student_number = '2261755170'").fetchone()["id"]
         conn.execute(
+            "INSERT INTO students (student_number, surname, initials, full_name, active) VALUES (?, ?, ?, ?, 1)",
+            ("18402000", "STUDENT SURNAME & INIT...", "TIME:", "STUDENT SURNAME & INIT... TIME:"),
+        )
+        contaminant_student_id = conn.execute("SELECT id FROM students WHERE student_number = '18402000'").fetchone()["id"]
+        conn.execute(
             "INSERT INTO group_enrolments (student_id, group_id, active) VALUES (?, ?, 1)",
             (active_student_id, group_id),
         )
         conn.execute(
             "INSERT INTO group_enrolments (student_id, group_id, active) VALUES (?, ?, 0)",
             (inactive_student_id, group_id),
+        )
+        conn.execute(
+            "INSERT INTO group_enrolments (student_id, group_id, active) VALUES (?, ?, 1)",
+            (contaminant_student_id, group_id),
         )
 
 
@@ -98,3 +107,5 @@ def test_register_context_includes_only_active_students_for_group():
 
     assert any(student["student_number"] == "226173453" for student in students)
     assert all(student["student_number"] != "2261755170" for student in students)
+    assert all(student["student_number"] != "18402000" for student in students)
+    assert all("STUDENT SURNAME" not in student["surname"] for student in students)
