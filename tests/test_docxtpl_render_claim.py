@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from docx import Document
 
 from app.create_maria_pilot_workbook import create_maria_pilot_workbook
 from app.dev_reset import dev_reset
+from app.generation_period_service import resolve_custom_generation_period
 from app.import_master_data import import_master_data
 from app_docxtpl.create_v2_templates import (
     CLAIM_TEMPLATE_V2,
@@ -19,6 +21,7 @@ from app_docxtpl.manual_templates import (
     MANUAL_REGISTER_TEMPLATE_V2,
     prepare_manual_templates_for_render,
 )
+from app_docxtpl.render_documents_v2 import render_documents_v2
 from app_docxtpl.render_claim_v2 import render_claim_v2
 
 
@@ -99,6 +102,30 @@ def test_maria_claim_v2_renders_expected_content(monkeypatch, tmp_path):
     assert "}}" not in text
     assert "Demo Clean Lecturer" not in text
     assert "Dummy Qualification" not in text
+
+
+def test_custom_period_render_documents_v2_succeeds_and_uses_custom_output(monkeypatch, tmp_path):
+    dev_reset()
+    prepare_manual_templates_for_render(validate=True)
+    period = resolve_custom_generation_period(date(2026, 2, 1), date(2026, 2, 28))
+
+    def _tmp_generated_v2_directory(year: int, month: int, staff_number: str, period=None) -> Path:
+        if period is not None and period.mode == "custom":
+            return tmp_path / "generated_v2" / str(period.year) / period.slug / str(staff_number)
+        return tmp_path / "generated_v2" / str(year) / f"{month:02d}" / str(staff_number)
+
+    monkeypatch.setattr("app_docxtpl.render_documents_v2.generated_v2_directory", _tmp_generated_v2_directory)
+    monkeypatch.setattr("app_docxtpl.render_claim_v2.generated_v2_directory", _tmp_generated_v2_directory)
+    monkeypatch.setattr("app_docxtpl.render_register_v2.generated_v2_directory", _tmp_generated_v2_directory)
+
+    result = render_documents_v2(200001, 2026, 2, generation_period=period)
+
+    assert result["claim_path"].exists()
+    assert result["register_paths"]
+    assert result["generation_period"]["mode"] == "custom"
+    assert "custom_20260201_to_20260228" in str(result["output_dir"])
+    assert all("custom_20260201_to_20260228" in row["storage_key"] for row in result["storage"])
+    assert result["total_sessions"] > 0
 
 
 def test_v2_template_paths_are_separate_from_old_golden_templates():

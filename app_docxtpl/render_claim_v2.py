@@ -5,7 +5,8 @@ from pathlib import Path
 
 from docxtpl import DocxTemplate
 
-from app.session_generator import generate_monthly_sessions
+from app.generation_period_service import GenerationPeriod
+from app.session_generator import generate_monthly_sessions, generate_sessions_for_period
 from app_docxtpl.context_builders import build_claim_context, generated_v2_directory
 from app_docxtpl.create_v2_templates import CLAIM_TEMPLATE_V2
 from app_docxtpl.manual_templates import prepare_manual_templates_for_render
@@ -17,16 +18,25 @@ def render_claim_v2(
     month: int,
     template_path: Path = CLAIM_TEMPLATE_V2,
     prepare_templates: bool = True,
+    generation_period: GenerationPeriod | None = None,
 ) -> Path:
     template_path = Path(template_path)
     if prepare_templates and template_path == CLAIM_TEMPLATE_V2:
         prepare_manual_templates_for_render(validate=True, force=True)
-    sessions_df = generate_monthly_sessions(lecturer_id, year, month)
+    sessions_df = (
+        generate_sessions_for_period(lecturer_id, generation_period)
+        if generation_period is not None
+        else generate_monthly_sessions(lecturer_id, year, month)
+    )
     if sessions_df.empty:
         raise ValueError("No generated sessions found for claim v2 rendering")
-    context = build_claim_context(sessions_df, year, month)
+    context = build_claim_context(sessions_df, year, month, period=generation_period)
     staff_number = context["staff_number"]
-    output_dir = generated_v2_directory(year, month, staff_number)
+    output_dir = (
+        generated_v2_directory(year, month, staff_number, period=generation_period)
+        if generation_period is not None
+        else generated_v2_directory(year, month, staff_number)
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"claim_form_v2_{staff_number}_{year}_{month:02d}.docx"
     if output_path.exists():

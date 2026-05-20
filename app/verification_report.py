@@ -6,7 +6,7 @@ import pandas as pd
 
 from app.db_provider import convert_placeholders, get_runtime_connection, rows_to_dicts
 from app.docx_utils import ensure_parent, format_month_year
-from app.claim_period_service import resolve_claim_period
+from app.generation_period_service import GenerationPeriod, resolve_standard_generation_period
 from app.session_generator import dates_between
 
 
@@ -24,9 +24,8 @@ CHECK_ITEMS = [
 ]
 
 
-def get_excluded_date_details(year: int, month: int) -> pd.DataFrame:
-    claim_period = resolve_claim_period(int(year), int(month))
-    month_start, month_end = claim_period.start_date, claim_period.end_date
+def get_excluded_date_details_for_period(period: GenerationPeriod) -> pd.DataFrame:
+    month_start, month_end = period.start_date, period.end_date
     rows = []
     for current_date in dates_between(month_start, month_end):
         if current_date.weekday() == 6:
@@ -60,6 +59,10 @@ def get_excluded_date_details(year: int, month: int) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["date", "reason", "source"]).drop_duplicates(ignore_index=True)
 
 
+def get_excluded_date_details(year: int, month: int) -> pd.DataFrame:
+    return get_excluded_date_details_for_period(resolve_standard_generation_period(int(year), int(month)))
+
+
 def generate_verification_checklist(
     sessions_df: pd.DataFrame,
     clashes_df: pd.DataFrame,
@@ -69,9 +72,11 @@ def generate_verification_checklist(
     documents_generated: bool,
     generation_status: str | None = None,
     notes: str = "",
+    generation_period: GenerationPeriod | None = None,
 ) -> Path:
     output = ensure_parent(output_path)
-    excluded_dates_df = get_excluded_date_details(year, month)
+    period = generation_period or resolve_standard_generation_period(int(year), int(month))
+    excluded_dates_df = get_excluded_date_details_for_period(period)
     if sessions_df.empty:
         lecturer_name = ""
         staff_number = ""
@@ -97,6 +102,8 @@ def generate_verification_checklist(
             ["Staff number", staff_number],
             ["Campus", campus],
             ["Month and year", format_month_year(year, month)],
+            ["Generation period", f"custom date range {period.display}" if period.mode == "custom" else period.display],
+            ["Generation period mode", period.mode],
             ["Total generated sessions", len(sessions_df)],
             ["Total groups", total_groups],
             ["Total hours", round(total_hours, 2)],

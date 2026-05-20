@@ -6,7 +6,8 @@ from pathlib import Path
 from docxtpl import DocxTemplate
 
 from app.docx_utils import safe_filename_text
-from app.session_generator import generate_monthly_sessions
+from app.generation_period_service import GenerationPeriod
+from app.session_generator import generate_monthly_sessions, generate_sessions_for_period
 from app_docxtpl.context_builders import build_register_page_contexts, generated_v2_directory
 from app_docxtpl.create_v2_templates import REGISTER_TEMPLATE_V2
 from app_docxtpl.manual_templates import prepare_manual_templates_for_render
@@ -25,15 +26,24 @@ def render_register_v2(
     month: int,
     template_path: Path = REGISTER_TEMPLATE_V2,
     prepare_templates: bool = True,
+    generation_period: GenerationPeriod | None = None,
 ) -> list[Path]:
     if prepare_templates:
         prepare_manual_templates_for_render(validate=True, force=True)
-    sessions_df = generate_monthly_sessions(lecturer_id, year, month)
+    sessions_df = (
+        generate_sessions_for_period(lecturer_id, generation_period)
+        if generation_period is not None
+        else generate_monthly_sessions(lecturer_id, year, month)
+    )
     if sessions_df.empty:
         raise ValueError("No generated sessions found for register v2 rendering")
-    contexts = build_register_page_contexts(sessions_df, year, month)
+    contexts = build_register_page_contexts(sessions_df, year, month, period=generation_period)
     staff_number = str(sessions_df["staff_number"].iloc[0])
-    output_dir = generated_v2_directory(year, month, staff_number) / "registers"
+    output_dir = (
+        generated_v2_directory(year, month, staff_number, period=generation_period)
+        if generation_period is not None
+        else generated_v2_directory(year, month, staff_number)
+    ) / "registers"
     output_dir.mkdir(parents=True, exist_ok=True)
     outputs: list[Path] = []
     for context in contexts:
