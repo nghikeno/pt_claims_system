@@ -1,9 +1,11 @@
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
 from app.database import get_connection, init_db
-from app.preclaim_verification_service import build_preclaim_verification, export_preclaim_verification_report
+from app.generation_period_service import resolve_custom_generation_period
+from app.preclaim_verification_service import build_preclaim_verification, build_preclaim_verification_for_period, export_preclaim_verification_report
 
 
 def _reset_preclaim_db(
@@ -213,3 +215,26 @@ def test_preclaim_reports_applied_calendar_exclusions_and_suspicious_enrolments(
     assert "2026-05-26" in set(result["tables"]["excluded_session_details"]["session_date"])
     assert result["tables"]["applied_calendar_exclusions"].iloc[0]["title"] == "Institutional Recess"
     assert result["tables"]["suspicious_enrolments"].iloc[0]["student_number"] == "18402000"
+
+
+def test_preclaim_custom_range_uses_same_session_period():
+    _reset_preclaim_db()
+    with get_connection() as conn:
+        conn.execute("DELETE FROM timetable_entries")
+        conn.execute(
+            """
+            INSERT INTO timetable_entries (
+                lecturer_id, group_id, day_of_week, start_time, end_time,
+                effective_start_date, effective_end_date, active
+            )
+            VALUES (1, 1, 'Monday', '10:00', '11:00', '2026-04-01', '2026-04-30', 1)
+            """
+        )
+    period = resolve_custom_generation_period(date(2026, 4, 6), date(2026, 4, 13))
+
+    result = build_preclaim_verification_for_period("900001", 2026, 4, period)
+    session_dates = set(result["tables"]["generated_sessions"]["session_date"])
+
+    assert result["summary"]["generation_period_mode"] == "custom"
+    assert result["summary"]["claim_period"] == "2026-04-06 to 2026-04-13"
+    assert session_dates == {"2026-04-06", "2026-04-13"}

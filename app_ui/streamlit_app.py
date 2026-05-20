@@ -102,10 +102,15 @@ from app.lecturer_staff_number_service import CONFIRMATION_PHRASE, correct_lectu
 from app.master_data_template import generate_master_data_template
 from app.performance_queries import lecturer_dashboard_counts
 from app.preclaim_verification_service import (
-    build_preclaim_verification,
+    build_preclaim_verification_for_period,
     export_preclaim_verification_report,
 )
-from app.session_generator import generate_monthly_sessions
+from app.generation_period_service import (
+    GenerationPeriod,
+    resolve_custom_generation_period,
+    resolve_standard_generation_period,
+)
+from app.session_generator import generate_monthly_sessions, generate_sessions_for_period
 from app.student_service import (
     deactivate_enrolment,
     export_student_enrolments_to_csv,
@@ -130,7 +135,7 @@ from app.timetable_service import (
 )
 from app.validators import detect_clashes
 from app.verification_report import generate_verification_checklist, get_excluded_date_details
-from app_docxtpl.context_builders import build_claim_context
+from app_docxtpl.context_builders import build_claim_context, generated_v2_storage_prefix
 from app_docxtpl.render_documents_v2 import render_documents_v2
 from app_ui.ui_helpers import (
     can_import_workbook,
@@ -246,12 +251,46 @@ def render_document_storage_summary(storage_rows: list[dict] | None) -> None:
                     st.link_button(f"Download {name}", url, width="stretch")
 
 
-def document_output_state_key(page_name: str, staff_number: str, year: int, month: int) -> str:
+def document_output_state_key(page_name: str, staff_number: str, year: int, month: int, period_slug: str | None = None) -> str:
     user = current_user() or {}
     actual = actual_user() or {}
     view_state = "view-as" if is_viewing_as_lecturer() else "normal"
     username = str(actual.get("username") or user.get("username") or "anonymous")
-    return f"document_output::{page_name}::{username}::{view_state}::{staff_number}::{int(year)}::{int(month):02d}"
+    slug = str(period_slug or f"{int(year)}/{int(month):02d}").replace("\\", "/").replace("/", "_")
+    return f"document_output::{page_name}::{username}::{view_state}::{staff_number}::{slug}"
+
+
+def generation_period_controls(prefix: str, *, default_year: int = 2026, default_month_index: int = 1) -> tuple[GenerationPeriod | None, int, int]:
+    mode = st.radio(
+        "Generation period",
+        ["Standard monthly period", "Custom date range"],
+        horizontal=True,
+        key=f"{prefix}_period_mode",
+    )
+    if mode == "Standard monthly period":
+        col1, col2 = st.columns(2)
+        year = int(col1.number_input("Year", min_value=2020, max_value=2100, value=default_year, step=1, key=f"{prefix}_year"))
+        month_label = col2.selectbox("Month", [name for _, name in month_options()], index=default_month_index, key=f"{prefix}_month")
+        month = month_number(month_label)
+        period = resolve_standard_generation_period(year, month)
+        st.caption(f"Claim/register period for {period.label}: {period.display}")
+        return period, year, month
+
+    col1, col2 = st.columns(2)
+    start = col1.date_input("Start date", value=date(default_year, 4, 1), key=f"{prefix}_custom_start")
+    end = col2.date_input("End date", value=date(default_year, 4, 30), key=f"{prefix}_custom_end")
+    year = int(getattr(start, "year", default_year))
+    month = int(getattr(start, "month", 1))
+    try:
+        period = resolve_custom_generation_period(start, end)
+    except ValueError as exc:
+        st.error(str(exc))
+        return None, year, month
+    if (period.end_date - period.start_date).days + 1 > 90:
+        st.warning("Selected custom date range is longer than 90 days. Review generated sessions carefully before submission.")
+    st.caption(f"Documents will be generated for {period.display}.")
+    st.caption("Academic Calendar exclusions will still be applied.")
+    return period, int(period.year or year), int(period.month or month)
 
 
 def build_document_output_state(
@@ -259,6 +298,7 @@ def build_document_output_state(
     staff_number: str,
     year: int,
     month: int,
+    generation_period: GenerationPeriod | None = None,
     storage_rows: list[dict] | None = None,
     zip_path: str | Path | None = None,
     verification_path: str | Path | None = None,
@@ -268,6 +308,14 @@ def build_document_output_state(
         "staff_number": str(staff_number),
         "year": int(year),
         "month": int(month),
+        "period": {
+            "mode": generation_period.mode if generation_period else "standard",
+            "start_date": generation_period.start_date.isoformat() if generation_period else "",
+            "end_date": generation_period.end_date.isoformat() if generation_period else "",
+            "label": generation_period.label if generation_period else "",
+            "display": generation_period.display if generation_period else "",
+            "slug": generation_period.slug if generation_period else f"{int(year)}/{int(month):02d}",
+        },
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "output_dir": str(result.get("output_dir") or ""),
         "claim_path": str(result.get("claim_path") or ""),
@@ -309,10 +357,12 @@ def generate_v2_document_output_state(
     year: int,
     month: int,
     *,
+    generation_period: GenerationPeriod | None = None,
     current_user_for_render: dict | None = None,
     audit_user: dict | None = None,
     include_verification_checklist: bool = False,
 ) -> dict:
+    period = generation_period or resolve_standard_generation_period(int(year), int(month))
     result = _generation_step(
         "v2 document render",
         render_documents_v2,
@@ -320,8 +370,9 @@ def generate_v2_document_output_state(
         int(year),
         int(month),
         current_user=current_user_for_render,
+        generation_period=period,
     )
-    sessions_df = _generation_step("session reload", generate_monthly_sessions, int(lecturer_identifier), int(year), int(month))
+    sessions_df = _generation_step("session reload", generate_sessions_for_period, int(lecturer_identifier), period)
     if sessions_df.empty:
         raise DocumentGenerationComponentError("session reload", ValueError("No generated sessions found."))
     staff_number = str(sessions_df["staff_number"].iloc[0])
@@ -329,27 +380,31 @@ def generate_v2_document_output_state(
         "claim completeness audit",
         audit_claim_completeness_from_data,
         sessions_df,
-        build_claim_context(sessions_df, int(year), int(month)),
+        build_claim_context(sessions_df, int(year), int(month), period=period),
     )
     output_folder = Path(result["output_dir"])
+    storage_prefix = generated_v2_storage_prefix(int(year), int(month), staff_number, period=period)
+    zip_suffix = period.slug.replace("/", "_") if period.mode == "custom" else f"{int(year)}_{int(month):02d}"
     zip_path = _generation_step(
         "register ZIP creation",
         create_registers_zip,
         result["register_paths"],
-        output_folder / f"registers_{staff_number}_{int(year)}_{int(month):02d}.zip",
+        output_folder / f"registers_{staff_number}_{zip_suffix}.zip",
     )
     storage_rows = list(result.get("storage", []))
     zip_storage = _generation_step(
         "storage upload",
         save_generated_file,
         zip_path,
-        f"generated_v2/{int(year)}/{int(month):02d}/{staff_number}/{storage_key_for_generated_file(zip_path, output_folder)}",
+        f"{storage_prefix}/{storage_key_for_generated_file(zip_path, output_folder)}",
     ).as_dict()
     storage_rows.append(zip_storage)
     verification_path = None
     if include_verification_checklist:
         clashes_df = _generation_step("clash detection", detect_clashes, sessions_df)
         verification_path = output_folder / f"verification_checklist_{staff_number}_{int(year)}_{int(month):02d}.xlsx"
+        if period.mode == "custom":
+            verification_path = output_folder / f"verification_checklist_{staff_number}_{period.slug}.xlsx"
         _generation_step(
             "verification checklist",
             generate_verification_checklist,
@@ -361,12 +416,13 @@ def generate_v2_document_output_state(
             True,
             "Generated with v2 docxtpl",
             "Verification checklist generated from Streamlit v2 docxtpl workflow.",
+            generation_period=period,
         )
         checklist_storage = _generation_step(
             "storage upload",
             save_generated_file,
             verification_path,
-            f"generated_v2/{int(year)}/{int(month):02d}/{staff_number}/{storage_key_for_generated_file(verification_path, output_folder)}",
+            f"{storage_prefix}/{storage_key_for_generated_file(verification_path, output_folder)}",
         ).as_dict()
         storage_rows.append(checklist_storage)
     log_audit_event(
@@ -374,13 +430,14 @@ def generate_v2_document_output_state(
         user=audit_user,
         entity_type="lecturer",
         entity_id=staff_number,
-        details={"year": int(year), "month": int(month), "engine": "v2"},
+        details={"year": int(year), "month": int(month), "engine": "v2", "period_mode": period.mode, "period": period.display},
     )
     return build_document_output_state(
         result,
         staff_number,
         int(year),
         int(month),
+        generation_period=period,
         storage_rows=storage_rows,
         zip_path=zip_path,
         verification_path=verification_path,
@@ -430,6 +487,10 @@ def render_document_output_state(state: dict, owner_label: str = "") -> None:
     created_at = state.get("created_at")
     if created_at:
         st.caption(f"Generated at: {created_at}")
+    period = state.get("period") or {}
+    if period.get("display"):
+        label = "Custom date range" if period.get("mode") == "custom" else "Generation period"
+        st.caption(f"{label}: {period.get('display')}")
     if storage_status.mode == "local":
         render_path_block("Output folder", state.get("output_dir", ""))
     else:
@@ -633,20 +694,20 @@ def page_my_documents() -> None:
     warning = generated_file_mode_warning()
     if warning:
         st.warning(warning)
-    col1, col2 = st.columns(2)
-    year = col1.number_input("Year", min_value=2020, max_value=2100, value=2026, step=1, key="my_docs_year")
-    month_label = col2.selectbox("Month", [name for _, name in month_options()], index=1, key="my_docs_month")
-    claim_period = resolve_claim_period(int(year), month_number(month_label))
-    st.caption(f"Claim/register period for {claim_period.label}: {claim_period.display}")
+    period, year, month = generation_period_controls("my_docs")
+    if period is None:
+        return
     st.caption("The recommended document engine is used automatically.")
-    month = month_number(month_label)
-    state_key = document_output_state_key("my_documents", staff_number, int(year), month)
+    if period.mode == "custom":
+        st.warning("For custom date ranges, review generated sessions and applied exclusions carefully before submission.")
+    state_key = document_output_state_key("my_documents", staff_number, int(year), month, period.slug)
     if st.button("Generate documents"):
         try:
             st.session_state[state_key] = generate_v2_document_output_state(
                 staff_number,
                 int(year),
                 month,
+                generation_period=period,
                 current_user_for_render=user,
                 audit_user=user,
                 include_verification_checklist=False,
@@ -655,7 +716,7 @@ def page_my_documents() -> None:
         except Exception as exc:
             show_document_generation_error("My document generation", exc)
     if st.session_state.get(state_key):
-        render_document_output_state(st.session_state[state_key], owner_label="Latest generated document set for this lecturer/month.")
+        render_document_output_state(st.session_state[state_key], owner_label="Latest generated document set for this lecturer/period.")
 
 
 def render_persistent_export_status(
@@ -2460,12 +2521,9 @@ def page_preclaim_verification() -> None:
     render_app_header("Pre-Claim Verification", "Review claim/register readiness before generating official documents.", badge="Admin")
     st.info("This page is read-only except for optional verification report export. It does not generate claim or register documents.")
     lecturer_id = lecturer_selector("preclaim_lecturer")
-    col1, col2 = st.columns(2)
-    year = col1.number_input("Year", min_value=2020, max_value=2100, value=2026, step=1, key="preclaim_year")
-    month_label = col2.selectbox("Month", [name for _, name in month_options()], index=1, key="preclaim_month")
-    month = month_number(month_label)
-    selected_period = resolve_claim_period(int(year), month)
-    st.caption(f"Claim/register period for {selected_period.label}: {selected_period.display}")
+    selected_period, year, month = generation_period_controls("preclaim")
+    if selected_period is None:
+        return
     if lecturer_id is None:
         return
 
@@ -2479,15 +2537,17 @@ def page_preclaim_verification() -> None:
         st.error("Selected lecturer was not found.")
         return
     staff_number = str(lecturer_row["staff_number"])
+    preclaim_state_key = f"{staff_number}:{selected_period.slug}"
 
     if st.button("Run pre-claim verification", key="run_preclaim_verification"):
         try:
-            st.session_state["preclaim_result"] = build_preclaim_verification(staff_number, int(year), month)
+            st.session_state["preclaim_result"] = build_preclaim_verification_for_period(staff_number, int(year), month, selected_period)
+            st.session_state["preclaim_result_key"] = preclaim_state_key
         except Exception as exc:
             show_error("Pre-claim verification failed.", exc)
             return
 
-    result = st.session_state.get("preclaim_result")
+    result = st.session_state.get("preclaim_result") if st.session_state.get("preclaim_result_key") == preclaim_state_key else None
     if not result:
         st.caption("Select a lecturer, year, and month, then run verification.")
         return
@@ -2505,7 +2565,7 @@ def page_preclaim_verification() -> None:
     cols = st.columns(4)
     cols[0].metric("Lecturer", summary.get("lecturer_name", ""))
     cols[1].metric("Staff number", summary.get("staff_number", ""))
-    cols[2].metric("Month", summary.get("year_month", ""))
+    cols[2].metric("Period", summary.get("generation_period_label") or summary.get("year_month", ""))
     cols[3].metric("Status", status)
     cols = st.columns(4)
     cols[0].metric("Sessions", int(summary.get("total_claimable_sessions", 0)))
@@ -2527,6 +2587,7 @@ def page_preclaim_verification() -> None:
                     "month_overlaps_contract": summary.get("month_overlaps_contract"),
                     "month_fully_within_contract": summary.get("month_fully_within_contract"),
                     "claim_period": summary.get("claim_period"),
+                    "generation_period_mode": summary.get("generation_period_mode"),
                 }
             ]
         ),
@@ -2546,10 +2607,10 @@ def page_preclaim_verification() -> None:
     _render_preclaim_table("Active lecturer-scoped groups", tables["groups"], "No active groups found.")
     _render_preclaim_table("Active timetable entries", tables["timetable"], "No active timetable entries found.")
     _render_preclaim_table("Active enrolments by zero-enrolment group", tables["zero_enrolment_groups"], "No zero-enrolment active groups found.")
-    _render_preclaim_table("Academic calendar exclusions affecting month", tables["calendar_exclusions"], "No active academic calendar exclusions found.")
+    _render_preclaim_table("Academic calendar exclusions affecting period", tables["calendar_exclusions"], "No active academic calendar exclusions found.")
     _render_preclaim_table("Applied calendar exclusions", tables.get("applied_calendar_exclusions", pd.DataFrame()), "No calendar exclusions were applied to generated sessions.")
     _render_preclaim_table("Excluded session details", tables.get("excluded_session_details", pd.DataFrame()), "No sessions were removed by calendar exclusions.")
-    _render_preclaim_table("Expected NUST reference items for month", tables["expected_calendar_items"], "No NUST reference items expected for this month.")
+    _render_preclaim_table("Expected NUST reference items for period", tables["expected_calendar_items"], "No NUST reference items expected for this period.")
     _render_preclaim_table("Suspicious enrolments", tables.get("suspicious_enrolments", pd.DataFrame()), "No suspicious header-row enrolments found.")
     _render_preclaim_table("Generated claimable sessions", safe_sessions_display_df(tables["generated_sessions"]) if not tables["generated_sessions"].empty else tables["generated_sessions"], "No generated claimable sessions found.")
     _render_preclaim_table("Totals by course", tables["totals_by_course"], "No course totals found.")
@@ -2737,9 +2798,9 @@ def page_document_generation() -> None:
     if warning:
         st.warning(warning)
     lecturer_id = lecturer_selector("docs_lecturer")
-    col1, col2 = st.columns(2)
-    year = col1.number_input("Year", min_value=2020, max_value=2100, value=2026, step=1, key="docs_year")
-    month_label = col2.selectbox("Month", [name for _, name in month_options()], index=1, key="docs_month")
+    period, year, month = generation_period_controls("docs")
+    if period is None:
+        return
     engine = "v2 docxtpl, recommended"
     with st.expander("Advanced options"):
         engine = st.selectbox(
@@ -2749,9 +2810,8 @@ def page_document_generation() -> None:
         )
     if engine != "v2 docxtpl, recommended":
         st.warning("Legacy engines are for troubleshooting only and may not preserve institutional formatting.")
-    month = month_number(month_label)
-    claim_period = resolve_claim_period(int(year), month)
-    st.caption(f"Claim/register period for {claim_period.label}: {claim_period.display}")
+    if period.mode == "custom":
+        st.warning("For custom date ranges, review generated sessions and applied exclusions carefully before submission.")
 
     if lecturer_id is None:
         return
@@ -2759,11 +2819,11 @@ def page_document_generation() -> None:
     if selected_staff_number is None:
         st.error("Selected lecturer was not found.")
         return
-    state_key = document_output_state_key("admin_documents", selected_staff_number, int(year), month)
+    state_key = document_output_state_key("admin_documents", selected_staff_number, int(year), month, period.slug)
     generate_clicked = st.button("Generate documents")
     if not generate_clicked:
         if st.session_state.get(state_key):
-            render_document_output_state(st.session_state[state_key], owner_label="Latest generated document set for this lecturer/month.")
+            render_document_output_state(st.session_state[state_key], owner_label="Latest generated document set for this lecturer/period.")
         return
     try:
         if engine == "v2 docxtpl, recommended":
@@ -2781,12 +2841,16 @@ def page_document_generation() -> None:
                 selected_staff_number,
                 int(year),
                 month,
+                generation_period=period,
                 audit_user=current_user(),
                 include_verification_checklist=True,
             )
             st.success("Documents generated successfully.")
-            render_document_output_state(st.session_state[state_key], owner_label="Latest generated document set for this lecturer/month.")
+            render_document_output_state(st.session_state[state_key], owner_label="Latest generated document set for this lecturer/period.")
         else:
+            if period.mode == "custom":
+                st.error("Custom date ranges are supported only by the recommended v2 docxtpl engine.")
+                return
             layout_mode = "template" if engine == "legacy template generator" else "generated"
             result = generate_monthly_documents(
                 lecturer_id,

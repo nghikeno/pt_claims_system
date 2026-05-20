@@ -7,6 +7,7 @@ import pandas as pd
 
 from app.attendance_register_generator import get_students_for_group
 from app.docx_utils import format_time_range
+from app.generation_period_service import GenerationPeriod
 from app.student_row_safety import is_suspicious_student_row
 
 
@@ -64,7 +65,27 @@ def _title_marks(title: str) -> dict[str, str]:
     return marks
 
 
-def build_claim_context(sessions_df: pd.DataFrame, year: int, month: int) -> dict:
+def _period_context(period: GenerationPeriod | None, year: int, month: int) -> dict:
+    if period is None:
+        return {
+            "generation_period_mode": "standard",
+            "generation_period_label": "",
+            "generation_period_display": "",
+            "generation_period_start": "",
+            "generation_period_end": "",
+            "generation_period_slug": f"{int(year)}/{int(month):02d}",
+        }
+    return {
+        "generation_period_mode": period.mode,
+        "generation_period_label": period.label,
+        "generation_period_display": period.display,
+        "generation_period_start": period.start_date.isoformat(),
+        "generation_period_end": period.end_date.isoformat(),
+        "generation_period_slug": period.slug,
+    }
+
+
+def build_claim_context(sessions_df: pd.DataFrame, year: int, month: int, period: GenerationPeriod | None = None) -> dict:
     if sessions_df.empty:
         raise ValueError("Cannot build claim context without sessions")
 
@@ -111,6 +132,7 @@ def build_claim_context(sessions_df: pd.DataFrame, year: int, month: int) -> dic
         "year": year,
         "month": month,
     }
+    context.update(_period_context(period, year, month))
     context.update(_title_marks(str(first["title"])))
     return context
 
@@ -145,7 +167,12 @@ def _blank_session_values(context: dict) -> None:
         context[f"session_{index}_time"] = ""
 
 
-def build_register_page_contexts(sessions_df: pd.DataFrame, year: int, month: int) -> list[dict]:
+def build_register_page_contexts(
+    sessions_df: pd.DataFrame,
+    year: int,
+    month: int,
+    period: GenerationPeriod | None = None,
+) -> list[dict]:
     if sessions_df.empty:
         raise ValueError("Cannot build register contexts without sessions")
 
@@ -176,6 +203,7 @@ def build_register_page_contexts(sessions_df: pd.DataFrame, year: int, month: in
                 "year": year,
                 "month": month,
             }
+            context.update(_period_context(period, year, month))
             _blank_session_values(context)
             for index, session in enumerate(chunk, start=1):
                 context[f"session_{index}_date"] = format_register_date(session["session_date"])
@@ -184,5 +212,13 @@ def build_register_page_contexts(sessions_df: pd.DataFrame, year: int, month: in
     return contexts
 
 
-def generated_v2_directory(year: int, month: int, staff_number: str) -> Path:
+def generated_v2_directory(year: int, month: int, staff_number: str, period: GenerationPeriod | None = None) -> Path:
+    if period is not None and period.mode == "custom":
+        return Path("data") / "generated_v2" / str(period.year or year) / period.slug / str(staff_number)
     return Path("data") / "generated_v2" / str(year) / f"{month:02d}" / str(staff_number)
+
+
+def generated_v2_storage_prefix(year: int, month: int, staff_number: str, period: GenerationPeriod | None = None) -> str:
+    if period is not None and period.mode == "custom":
+        return f"generated_v2/{period.year or year}/{period.slug}/{staff_number}"
+    return f"generated_v2/{int(year)}/{int(month):02d}/{staff_number}"

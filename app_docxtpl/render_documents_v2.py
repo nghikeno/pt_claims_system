@@ -7,8 +7,9 @@ from pathlib import Path
 
 from app.auth_service import authorize_lecturer_access
 from app.document_storage import store_generated_document_set
-from app.session_generator import generate_monthly_sessions
-from app_docxtpl.context_builders import build_claim_context, generated_v2_directory
+from app.generation_period_service import GenerationPeriod
+from app.session_generator import generate_monthly_sessions, generate_sessions_for_period
+from app_docxtpl.context_builders import build_claim_context, generated_v2_directory, generated_v2_storage_prefix
 from app_docxtpl.create_v2_templates import CLAIM_TEMPLATE_V2
 from app_docxtpl.manual_templates import extract_docx_text, prepare_manual_templates_for_render
 from app_docxtpl.render_claim_v2 import render_claim_v2
@@ -73,13 +74,22 @@ def render_documents_v2(
     debug_template_text: bool = False,
     claim_template: Path | None = None,
     current_user: dict | None = None,
+    generation_period: GenerationPeriod | None = None,
 ) -> dict:
     if current_user is not None:
         lecturer_id = authorize_lecturer_access(current_user, lecturer_id)
-    sessions_df = generate_monthly_sessions(lecturer_id, year, month)
-    claim_context = build_claim_context(sessions_df, year, month)
+    sessions_df = (
+        generate_sessions_for_period(lecturer_id, generation_period)
+        if generation_period is not None
+        else generate_monthly_sessions(lecturer_id, year, month)
+    )
+    claim_context = build_claim_context(sessions_df, year, month, period=generation_period)
     staff_number = claim_context["staff_number"]
-    output_dir = generated_v2_directory(year, month, staff_number)
+    output_dir = (
+        generated_v2_directory(year, month, staff_number, period=generation_period)
+        if generation_period is not None
+        else generated_v2_directory(year, month, staff_number)
+    )
     if output_dir.exists():
         shutil.rmtree(output_dir)
         print(f"Deleted old output folder: {output_dir}")
@@ -91,9 +101,9 @@ def render_documents_v2(
         template_info = prepare_manual_templates_for_render(validate=True, force=True)
     claim_template_path = claim_template or (template_info["render_claim_path"] if template_info else CLAIM_TEMPLATE_V2)
     claim_path = render_claim_v2(
-        lecturer_id, year, month, template_path=claim_template_path, prepare_templates=False
+        lecturer_id, year, month, template_path=claim_template_path, prepare_templates=False, generation_period=generation_period
     )
-    register_paths = render_register_v2(lecturer_id, year, month, prepare_templates=False)
+    register_paths = render_register_v2(lecturer_id, year, month, prepare_templates=False, generation_period=generation_period)
     provenance_path = None
     if template_info:
         provenance_path = _write_provenance(
@@ -104,7 +114,7 @@ def render_documents_v2(
     storage_results = store_generated_document_set(
         [claim_path, *register_paths],
         output_dir=output_dir,
-        prefix=f"generated_v2/{year}/{month:02d}/{staff_number}",
+        prefix=generated_v2_storage_prefix(year, month, staff_number, period=generation_period),
     )
     return {
         "claim_path": claim_path,
@@ -116,6 +126,14 @@ def render_documents_v2(
         "template_info": template_info,
         "output_dir": output_dir,
         "provenance_path": provenance_path,
+        "generation_period": {
+            "mode": generation_period.mode if generation_period else "standard",
+            "start_date": generation_period.start_date.isoformat() if generation_period else "",
+            "end_date": generation_period.end_date.isoformat() if generation_period else "",
+            "label": generation_period.label if generation_period else "",
+            "display": generation_period.display if generation_period else "",
+            "slug": generation_period.slug if generation_period else f"{int(year)}/{int(month):02d}",
+        },
     }
 
 

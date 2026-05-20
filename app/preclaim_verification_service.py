@@ -8,11 +8,11 @@ from typing import Any
 import pandas as pd
 
 from app.academic_calendar_service import NUST_2026_REFERENCE_ITEMS, fetch_calendar_exclusions_for_period
-from app.claim_period_service import resolve_claim_period
 from app.config import EXPORTS_DIR, database_provider
 from app.database import init_db
 from app.db_provider import convert_placeholders, get_runtime_connection, row_to_dict, rows_to_dicts
-from app.session_generator import generate_monthly_sessions
+from app.generation_period_service import GenerationPeriod, resolve_standard_generation_period
+from app.session_generator import generate_monthly_sessions, generate_sessions_for_period
 from app.student_row_safety import suspicious_student_row_reason
 from app.validators import detect_clashes, parse_date
 
@@ -29,8 +29,11 @@ def _month_label(year: int, month: int) -> str:
 
 
 def _month_overlaps(start_date: str, end_date: str, year: int, month: int) -> tuple[bool, bool]:
-    claim_period = resolve_claim_period(int(year), int(month))
-    month_start, month_end = claim_period.start_date, claim_period.end_date
+    return _period_overlaps(start_date, end_date, resolve_standard_generation_period(int(year), int(month)))
+
+
+def _period_overlaps(start_date: str, end_date: str, period: GenerationPeriod) -> tuple[bool, bool]:
+    month_start, month_end = period.start_date, period.end_date
     contract_start = parse_date(start_date)
     contract_end = parse_date(end_date)
     overlaps = contract_start <= month_end and contract_end >= month_start
@@ -132,8 +135,11 @@ def _fetch_suspicious_enrolments(staff_number: str) -> pd.DataFrame:
 
 
 def _expected_calendar_items(year: int, month: int) -> list[dict[str, str]]:
-    claim_period = resolve_claim_period(int(year), int(month))
-    month_start, month_end = claim_period.start_date, claim_period.end_date
+    return _expected_calendar_items_for_period(resolve_standard_generation_period(int(year), int(month)))
+
+
+def _expected_calendar_items_for_period(period: GenerationPeriod) -> list[dict[str, str]]:
+    month_start, month_end = period.start_date, period.end_date
     expected: list[dict[str, str]] = []
     for item in NUST_2026_REFERENCE_ITEMS:
         if item.get("category") == "Reference":
@@ -149,8 +155,11 @@ def _expected_calendar_items(year: int, month: int) -> list[dict[str, str]]:
 
 
 def _calendar_exclusions_df(year: int, month: int) -> pd.DataFrame:
-    claim_period = resolve_claim_period(int(year), int(month))
-    month_start, month_end = claim_period.start_date, claim_period.end_date
+    return _calendar_exclusions_df_for_period(resolve_standard_generation_period(int(year), int(month)))
+
+
+def _calendar_exclusions_df_for_period(period: GenerationPeriod) -> pd.DataFrame:
+    month_start, month_end = period.start_date, period.end_date
     rows = fetch_calendar_exclusions_for_period(month_start.isoformat(), month_end.isoformat())
     return pd.DataFrame(rows)
 
@@ -170,10 +179,24 @@ def _totals_by(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
 
 
 def build_preclaim_verification(staff_number: str, year: int, month: int) -> dict[str, Any]:
+    return build_preclaim_verification_for_period(
+        staff_number,
+        int(year),
+        int(month),
+        resolve_standard_generation_period(int(year), int(month)),
+    )
+
+
+def build_preclaim_verification_for_period(
+    staff_number: str,
+    year: int,
+    month: int,
+    generation_period: GenerationPeriod,
+) -> dict[str, Any]:
     staff_number = str(staff_number).strip()
     year = int(year)
     month = int(month)
-    claim_period = resolve_claim_period(year, month)
+    claim_period = generation_period
     blockers: list[str] = []
     warnings: list[str] = []
 
@@ -190,13 +213,21 @@ def build_preclaim_verification(staff_number: str, year: int, month: int) -> dic
     if not int(lecturer.get("active") or 0):
         blockers.append("Lecturer is inactive.")
 
-    overlaps_contract, full_contract_overlap = _month_overlaps(
-        lecturer["contract_start_date"], lecturer["contract_end_date"], year, month
+    overlaps_contract, full_contract_overlap = _period_overlaps(
+        lecturer["contract_start_date"], lecturer["contract_end_date"], generation_period
     )
     if not overlaps_contract:
-        blockers.append("Selected month is completely outside the lecturer contract period.")
+        blockers.append(
+            "Selected month is completely outside the lecturer contract period."
+            if generation_period.mode == "standard"
+            else "Selected period is completely outside the lecturer contract period."
+        )
     elif not full_contract_overlap:
-        warnings.append("Selected month only partially overlaps the lecturer contract period.")
+        warnings.append(
+            "Selected month only partially overlaps the lecturer contract period."
+            if generation_period.mode == "standard"
+            else "Selected period only partially overlaps the lecturer contract period."
+        )
 
     groups_df = _fetch_active_groups(staff_number)
     timetable_df = _fetch_active_timetable(staff_number)
@@ -216,13 +247,17 @@ def build_preclaim_verification(staff_number: str, year: int, month: int) -> dic
     if not suspicious_enrolments_df.empty:
         warnings.append("One or more enrolments look like imported header rows.")
 
-    calendar_df = _calendar_exclusions_df(year, month)
-    expected_calendar_items = _expected_calendar_items(year, month)
+    calendar_df = _calendar_exclusions_df_for_period(generation_period)
+    expected_calendar_items = _expected_calendar_items_for_period(generation_period)
     if expected_calendar_items and calendar_df.empty:
-        warnings.append("Official NUST calendar items are expected for this month, but no active academic calendar exclusions were found.")
+        warnings.append("Official NUST calendar items are expected for this period, but no active academic calendar exclusions were found.")
 
     try:
-        sessions_df = generate_monthly_sessions(int(staff_number), year, month)
+        sessions_df = (
+            generate_sessions_for_period(int(staff_number), generation_period)
+            if generation_period.mode == "custom"
+            else generate_monthly_sessions(int(staff_number), year, month)
+        )
     except Exception as exc:
         sessions_df = _empty_df([
             "course_code",
@@ -274,6 +309,9 @@ def build_preclaim_verification(staff_number: str, year: int, month: int) -> dic
         "claim_period_end": claim_period.end_date.isoformat(),
         "claim_period": claim_period.display,
         "claim_period_custom": claim_period.custom,
+        "generation_period_mode": generation_period.mode,
+        "generation_period_label": generation_period.label,
+        "generation_period_slug": generation_period.slug,
         "month_overlaps_contract": overlaps_contract,
         "month_fully_within_contract": full_contract_overlap,
         "active_group_count": int(len(groups_df)),
@@ -312,10 +350,11 @@ def export_preclaim_verification_report(result: dict[str, Any], output_dir: str 
     staff_number = str(summary.get("staff_number", "unknown")).replace(" ", "")
     year = int(summary.get("year", 0) or 0)
     month = int(summary.get("month", 0) or 0)
+    period_slug = str(summary.get("generation_period_slug") or f"{year}_{month:02d}").replace("/", "_")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
-    output_path = target_dir / f"preclaim_verification_{staff_number}_{year}_{month:02d}_{timestamp}.csv"
+    output_path = target_dir / f"preclaim_verification_{staff_number}_{period_slug}_{timestamp}.csv"
 
     with output_path.open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.writer(handle)

@@ -1,6 +1,9 @@
+from datetime import date
+
 from app.database import get_connection, init_db
 from app.academic_calendar_service import import_nust_2026_exclusions
-from app.session_generator import generate_monthly_sessions
+from app.generation_period_service import resolve_custom_generation_period
+from app.session_generator import generate_monthly_sessions, generate_sessions_for_period
 
 
 def _reset_minimal_session_data() -> None:
@@ -284,3 +287,34 @@ def test_imported_nust_exclusions_remove_may_recess_and_holiday_from_sessions(mo
     assert "2026-05-27" not in filtered_dates
     assert "2026-05-28" not in filtered_dates
     assert "2026-05-29" not in filtered_dates
+
+
+def test_custom_date_range_uses_selected_dates_and_applies_nust_exclusions(monkeypatch):
+    _reset_minimal_session_data()
+    monkeypatch.setattr("app.academic_calendar_service._backup", lambda prefix: {"performed": True, "mode": "sqlite", "safe_message": "backup", "path": "backup.db"})
+    monkeypatch.setattr("app.academic_calendar_service.log_audit_event", lambda *args, **kwargs: None)
+    with get_connection() as conn:
+        conn.execute("DELETE FROM timetable_entries")
+        conn.execute(
+            """
+            INSERT INTO timetable_entries (
+                lecturer_id, group_id, day_of_week, start_time, end_time,
+                effective_start_date, effective_end_date, active
+            )
+            VALUES
+                (101, 301, 'Friday', '10:00', '11:00', '2026-04-01', '2026-04-30', 1),
+                (101, 301, 'Monday', '10:00', '11:00', '2026-04-01', '2026-04-30', 1),
+                (101, 301, 'Tuesday', '10:00', '11:00', '2026-04-01', '2026-04-30', 1)
+            """
+        )
+    import_nust_2026_exclusions(confirm_phrase="IMPORT NUST EXCLUSIONS", dry_run=False)
+
+    period = resolve_custom_generation_period(date(2026, 4, 3), date(2026, 4, 14))
+    sessions = generate_sessions_for_period(900101, period)
+    dates = set(sessions["session_date"])
+
+    assert "2026-04-03" not in dates
+    assert "2026-04-06" not in dates
+    assert "2026-04-07" in dates
+    assert all("2026-04-03" <= session_date <= "2026-04-14" for session_date in dates)
+    assert sessions.attrs["generation_period_mode"] == "custom"

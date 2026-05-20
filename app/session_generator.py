@@ -6,10 +6,10 @@ from pathlib import Path
 import pandas as pd
 
 from app.academic_calendar_service import calendar_exclusion_applies, fetch_calendar_exclusions_for_period
-from app.claim_period_service import resolve_claim_period
 from app.config import EXPORTS_DIR
 from app.db_provider import convert_placeholders, get_runtime_connection, row_to_dict, rows_to_dicts
 from app.export_excel import export_sessions_to_excel
+from app.generation_period_service import GenerationPeriod, resolve_standard_generation_period
 from app.validators import calculate_hours, detect_clashes, parse_date
 
 
@@ -38,9 +38,8 @@ def dates_between(start_date: date, end_date: date) -> list[date]:
     return days
 
 
-def get_excluded_dates(year: int, month: int) -> set[date]:
-    claim_period = resolve_claim_period(year, month)
-    period_start, period_end = claim_period.start_date, claim_period.end_date
+def get_excluded_dates_for_period(period: GenerationPeriod) -> set[date]:
+    period_start, period_end = period.start_date, period.end_date
     excluded = {day for day in dates_between(period_start, period_end) if day.weekday() == DAY_NAMES["Sunday"]}
 
     with get_runtime_connection() as conn:
@@ -66,6 +65,10 @@ def get_excluded_dates(year: int, month: int) -> set[date]:
         end = min(parse_date(row["end_date"]), period_end)
         excluded.update(dates_between(start, end))
     return excluded
+
+
+def get_excluded_dates(year: int, month: int) -> set[date]:
+    return get_excluded_dates_for_period(resolve_standard_generation_period(year, month))
 
 
 def _calendar_exclusion_label(row: dict) -> str:
@@ -131,12 +134,24 @@ def _fetch_timetable_entries(lecturer_id: int) -> list[dict]:
     return rows_to_dicts(rows)
 
 
-def generate_monthly_sessions(lecturer_id: int, year: int, month: int) -> pd.DataFrame:
+def _set_period_attrs(sessions_df: pd.DataFrame, period: GenerationPeriod, excluded_dates_count: int) -> pd.DataFrame:
+    sessions_df.attrs["excluded_dates_count"] = excluded_dates_count
+    sessions_df.attrs["claim_period_start"] = period.start_date.isoformat()
+    sessions_df.attrs["claim_period_end"] = period.end_date.isoformat()
+    sessions_df.attrs["claim_period_label"] = period.label
+    sessions_df.attrs["generation_period_mode"] = period.mode
+    sessions_df.attrs["generation_period_slug"] = period.slug
+    sessions_df.attrs["generation_period_display"] = period.display
+    sessions_df.attrs["generation_period_year"] = period.year
+    sessions_df.attrs["generation_period_month"] = period.month
+    return sessions_df
+
+
+def generate_sessions_for_period(lecturer_id: int, period: GenerationPeriod) -> pd.DataFrame:
     lecturer = _fetch_lecturer(lecturer_id)
     timetable_entries = _fetch_timetable_entries(lecturer_id)
-    excluded_dates = get_excluded_dates(year, month)
-    claim_period = resolve_claim_period(year, month)
-    period_start, period_end = claim_period.start_date, claim_period.end_date
+    excluded_dates = get_excluded_dates_for_period(period)
+    period_start, period_end = period.start_date, period.end_date
     contract_start = parse_date(lecturer["contract_start_date"])
     contract_end = parse_date(lecturer["contract_end_date"])
     calendar_exclusions = fetch_calendar_exclusions_for_period(period_start.isoformat(), period_end.isoformat())
@@ -174,10 +189,7 @@ def generate_monthly_sessions(lecturer_id: int, year: int, month: int) -> pd.Dat
     ]
     if generation_start > generation_end:
         empty_df = pd.DataFrame(columns=columns)
-        empty_df.attrs["excluded_dates_count"] = len(excluded_dates)
-        empty_df.attrs["claim_period_start"] = period_start.isoformat()
-        empty_df.attrs["claim_period_end"] = period_end.isoformat()
-        empty_df.attrs["claim_period_label"] = claim_period.label
+        _set_period_attrs(empty_df, period, len(excluded_dates))
         empty_df.attrs["applied_calendar_exclusions"] = []
         empty_df.attrs["excluded_session_details"] = []
         return empty_df
@@ -274,13 +286,14 @@ def generate_monthly_sessions(lecturer_id: int, year: int, month: int) -> pd.Dat
     sessions_df = pd.DataFrame(sessions, columns=columns).sort_values(
         ["session_date", "start_time", "group_name"], ignore_index=True
     )
-    sessions_df.attrs["excluded_dates_count"] = len(excluded_dates)
-    sessions_df.attrs["claim_period_start"] = period_start.isoformat()
-    sessions_df.attrs["claim_period_end"] = period_end.isoformat()
-    sessions_df.attrs["claim_period_label"] = claim_period.label
+    _set_period_attrs(sessions_df, period, len(excluded_dates))
     sessions_df.attrs["applied_calendar_exclusions"] = list(applied_exclusions.values())
     sessions_df.attrs["excluded_session_details"] = excluded_session_details
     return sessions_df
+
+
+def generate_monthly_sessions(lecturer_id: int, year: int, month: int) -> pd.DataFrame:
+    return generate_sessions_for_period(lecturer_id, resolve_standard_generation_period(year, month))
 
 
 def main() -> None:

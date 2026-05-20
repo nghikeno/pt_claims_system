@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import pandas as pd
 
@@ -8,8 +9,9 @@ from app.create_maria_pilot_workbook import create_maria_pilot_workbook
 from app.dev_reset import dev_reset
 from app.import_master_data import import_master_data
 from app.session_generator import generate_monthly_sessions
+from app.generation_period_service import resolve_custom_generation_period
 from app.claim_completeness_service import audit_claim_completeness_from_data
-from app_docxtpl.context_builders import build_claim_context, build_register_page_contexts
+from app_docxtpl.context_builders import build_claim_context, build_register_page_contexts, generated_v2_directory, generated_v2_storage_prefix
 
 
 def _load_maria_sessions():
@@ -127,6 +129,49 @@ def test_claim_context_keeps_same_group_name_distinct_across_courses():
     assert {row["course_code"] for row in first_rows} == {"CUS411S", "ICT521S"}
     assert audit["status"] == "PASS"
     assert audit["missing_pairs"] == []
+
+
+def test_custom_period_context_and_output_paths_do_not_collide_with_monthly_outputs():
+    sessions_df = pd.DataFrame(
+        [
+            {
+                "course_code": "CUS411S",
+                "course_name": "Course A",
+                "department": "Informatics",
+                "faculty": "Computing",
+                "budget_allocation": "B1",
+                "group_name": "GROUP_A",
+                "campus": "Main",
+                "session_date": "2026-04-07",
+                "start_time": "08:00",
+                "end_time": "09:00",
+                "hours": 1.0,
+                "amount": 440.0,
+                "tariff_per_hour": 440.0,
+                "title": "Ms",
+                "lecturer_name": "Demo Lecturer",
+                "highest_qualification": "MSc",
+                "staff_number": "900001",
+                "id_or_passport_number": "DUMMY",
+                "paye_number": "DUMMY",
+                "physical_address": "DUMMY",
+                "contact_number": "DUMMY",
+            }
+        ]
+    )
+    period = resolve_custom_generation_period(date(2026, 4, 3), date(2026, 4, 29))
+
+    claim_context = build_claim_context(sessions_df, 2026, 4, period=period)
+    register_context = build_register_page_contexts(sessions_df, 2026, 4, period=period)[0]
+
+    assert claim_context["generation_period_mode"] == "custom"
+    assert register_context["generation_period_display"] == "2026-04-03 to 2026-04-29"
+    assert generated_v2_directory(2026, 4, "900001", period=period).as_posix().endswith(
+        "data/generated_v2/2026/custom_20260403_to_20260429/900001"
+    )
+    assert generated_v2_storage_prefix(2026, 4, "900001", period=period) == (
+        "generated_v2/2026/custom_20260403_to_20260429/900001"
+    )
 
 
 def test_claim_completeness_detects_missing_course_group_pair():
